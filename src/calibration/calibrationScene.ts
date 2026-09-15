@@ -10,6 +10,10 @@ const SETTLE_MS = 400;            // atraso entre o alvo aparecer e a captura se
 export const BLINK_TRIGGER_MS = 200;
 /** Na tela de resultado, olhos fechados por isso = repetir o pior alvo. */
 const BLINK_LONG_MS = 1000;
+/** Mira livre: sobrancelhas levantadas (browInnerUp) por RECENTER_HOLD_MS = recentralizar. */
+const BROW_UP_THRESHOLD = 0.5;
+const RECENTER_HOLD_MS = 1000;
+const RECENTER_FLASH_MS = 1500;
 const WINDOW_START_MS = 500;      // janela de amostra: de 500 ms…
 const WINDOW_END_MS = 150;        // …a 150 ms antes do início do fechamento
 const MIN_WINDOW_FRAMES = 4;      // menos que isso, mediana e desvio não significam nada
@@ -44,6 +48,8 @@ export interface CalibrationSceneHooks {
   setPanelCollapsed(collapsed: boolean): void;
   /** Piscada deliberada na mira livre: começa o jogo. */
   startGame(): void;
+  /** Recentralizar a mira no ponto (x, y) que o jogador está olhando. Devolve se deu certo. */
+  recenter(x: number, y: number): boolean;
 }
 
 /**
@@ -65,6 +71,10 @@ export class CalibrationScene {
   private repeating: number | null = null;
   private worstPoint: number | null = null;
   private resultError: string | null = null;
+
+  private browUpSince: number | null = null;
+  private browHandled = false;
+  private recenterMessage: { text: string; at: number } | null = null;
 
   /** Último descarte de amostra, com o motivo (mostrado só no painel). */
   lastDiscard: DiscardInfo | null = null;
@@ -111,6 +121,8 @@ export class CalibrationScene {
     const t = frame.timestamp;
     const now = performance.now();
 
+    if (this.phase === 'free') this.updateRecenterGesture(frame, t, screenW, screenH);
+
     if (frame.faceDetected && frame.eyeState.bothClosed) {
       if (this.closedSince === null) {
         this.closedSince = t;
@@ -138,6 +150,30 @@ export class CalibrationScene {
       if (!this.closureHandled && this.phase === 'results' && held >= BLINK_TRIGGER_MS) this.phase = 'free';
       this.closedSince = null;
       this.closureHandled = false;
+    }
+  }
+
+  /** Recentraliza na mira livre olhando o alvo do centro (gesto de sobrancelha ou tecla C). */
+  recenterOnCenter(screenW: number, screenH: number): void {
+    if (this.phase !== 'free') return;
+    const ok = this.hooks.recenter(screenW / 2, screenH / 2);
+    this.recenterMessage = {
+      text: ok ? 'Mira recentralizada' : 'Calibre primeiro para poder recentralizar',
+      at: performance.now(),
+    };
+  }
+
+  private updateRecenterGesture(frame: FaceFrame, t: number, screenW: number, screenH: number): void {
+    const up = frame.faceDetected && (frame.blendshapes.browInnerUp ?? 0) > BROW_UP_THRESHOLD;
+    if (!up) {
+      this.browUpSince = null;
+      this.browHandled = false;
+      return;
+    }
+    this.browUpSince ??= t;
+    if (!this.browHandled && t - this.browUpSince >= RECENTER_HOLD_MS) {
+      this.browHandled = true;
+      this.recenterOnCenter(screenW, screenH);
     }
   }
 
@@ -200,6 +236,10 @@ export class CalibrationScene {
           drawTarget(ctx, t.x, t.y, TARGET_RADIUS, 1, aim?.snappedTargetId === t.id);
         }
         drawText(ctx, screenW / 2, 40, 'Mira livre · feche os dois olhos por um instante para jogar', 18, '#94a3b8');
+        drawText(ctx, screenW / 2, 66, 'Mira desviada? Olhe o alvo do centro e levante as sobrancelhas por 1 s (ou tecla C)', 15, '#64748b');
+        if (this.recenterMessage && now - this.recenterMessage.at < RECENTER_FLASH_MS) {
+          drawText(ctx, screenW / 2, screenH / 2 - 90, this.recenterMessage.text, 24, '#4ade80');
+        }
         break;
       }
     }

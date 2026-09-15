@@ -36,9 +36,9 @@ export class Score {
     this.roundResults = new Array(DUCKS_PER_ROUND).fill(null);
   }
 
-  /** Registra um pato abatido e devolve os pontos ganhos. */
-  hit(round: number, slot: number): number {
-    const points = Score.pointsPerDuck(round);
+  /** Registra um pato abatido e devolve os pontos ganhos (multiplier: ex. 3 para o blindado). */
+  hit(round: number, slot: number, multiplier = 1): number {
+    const points = Score.pointsPerDuck(round) * multiplier;
     this.roundResults[slot] = 'hit';
     this.total += points;
     this.hitsTotal++;

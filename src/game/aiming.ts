@@ -13,6 +13,8 @@ const SNAP_LAG_MS = 150;
 const TARGET_HISTORY_MS = 400;
 /** A mira congela quando o eyeBlink sobe esta fração de blinkRise acima do repouso (início da piscada). */
 const BLINK_ONSET_FRACTION = 0.6;
+/** Recentralizar usa a mediana da mira deste intervalo mais recente. */
+const RECENTER_WINDOW_MS = 600;
 
 export interface AimTarget {
   id: string;
@@ -34,6 +36,8 @@ export interface AimState {
   hasModel: boolean;
   /** A contribuição do olho está congelada por uma piscada em curso. */
   eyeFrozen: boolean;
+  /** Correção de "Recentralizar" somada à mira. */
+  bias: { x: number; y: number };
 }
 
 /**
@@ -70,6 +74,8 @@ export class Aiming {
   /** Posições recentes de cada alvo, para o snap compensar o atraso da mira. */
   private targetHistory = new Map<string, { t: number; x: number; y: number }[]>();
   private state: AimState | null = null;
+  /** Mira (antes da correção e do snap) dos frames recentes, para Recentralizar. */
+  private rawHistory: { t: number; x: number; y: number }[] = [];
 
   constructor(
     private readonly config: DebugConfig,
@@ -152,11 +158,18 @@ export class Aiming {
       this.eyeFilterY.reset();
     }
 
-    // 3. Fusão por soma.
+    // 3. Fusão por soma (+ correção de Recentralizar).
     const e = eyeOffset ?? { x: 0, y: 0 };
+    const bias = model?.aimBias ?? { x: 0, y: 0 };
+    const rawX = cx + e.x + headOffset.x;
+    const rawY = cy + e.y + headOffset.y;
+    if (!eyeFrozen) {
+      this.rawHistory.push({ t: now, x: rawX, y: rawY });
+      while (this.rawHistory.length > 0 && this.rawHistory[0].t < now - RECENTER_WINDOW_MS) this.rawHistory.shift();
+    }
     const unsnapped = {
-      x: clamp(cx + e.x + headOffset.x, 0, screenW),
-      y: clamp(cy + e.y + headOffset.y, 0, screenH),
+      x: clamp(rawX + bias.x, 0, screenW),
+      y: clamp(rawY + bias.y, 0, screenH),
     };
 
     // 4. Snap com histerese: gruda abaixo de snapRadius, só solta acima de snapRadius + snapHysteresis.
@@ -192,8 +205,28 @@ export class Aiming {
       headDelta,
       hasModel: !!model,
       eyeFrozen,
+      bias,
     };
     return this.state;
+  }
+
+  /**
+   * Recentralizar: o jogador está olhando (x, y). A correção passa a ser a diferença entre
+   * esse ponto e a mediana da mira (sem correção) dos últimos RECENTER_WINDOW_MS.
+   * Corrige o desvio de quem se ajeitou na cadeira sem refazer o Estande. Precisa de modelo.
+   */
+  recenter(x: number, y: number): boolean {
+    if (!this.store.model || this.rawHistory.length < 3) return false;
+    const med = (v: number[]) => {
+      const s = [...v].sort((a, b) => a - b);
+      const m = s.length >> 1;
+      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    };
+    this.store.setAimBias({
+      x: x - med(this.rawHistory.map((h) => h.x)),
+      y: y - med(this.rawHistory.map((h) => h.y)),
+    });
+    return true;
   }
 
   private recordTargets(now: number, targets: readonly AimTarget[]): void {

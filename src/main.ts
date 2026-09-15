@@ -92,6 +92,12 @@ const scene = new CalibrationScene(store, buffer, {
     panel.setCollapsed(true);
     game.start();
   },
+  recenter: (x, y) => aiming.recenter(x, y),
+});
+
+// Tecla C na mira livre: recentralizar olhando o alvo do centro.
+window.addEventListener('keydown', (e) => {
+  if ((e.key === 'c' || e.key === 'C') && activeScene === 'calibration') scene.recenterOnCenter(screenW(), screenH());
 });
 
 const trackingFps = new FpsCounter();
@@ -121,6 +127,13 @@ window.addEventListener('resize', () => {
 
 // ---------- Loop de tracking: um detect por frame novo da câmera ----------
 
+/** Identificador do callback de frame pendente, para cancelar ao trocar de câmera (evita dois loops). */
+let frameCallbackHandle = 0;
+
+function scheduleNextFrame(): void {
+  frameCallbackHandle = video.requestVideoFrameCallback(onVideoFrame);
+}
+
 function onVideoFrame(now: number): void {
   try {
     const frame = tracker.process(video, now);
@@ -141,7 +154,7 @@ function onVideoFrame(now: number): void {
   } catch (err) {
     console.error('Erro no tracking', err);
   }
-  video.requestVideoFrameCallback(onVideoFrame);
+  scheduleNextFrame();
 }
 
 // ---------- Loop de render (tudo em px CSS) ----------
@@ -175,7 +188,7 @@ function drawTrail(trail: (Point | null)[], rgb: string): void {
   });
 }
 
-/** Contribuições de cabeça e olho (sem peso), cada uma a partir do centro. */
+/** Contribuições de cabeça e olho (as parcelas da soma), cada uma a partir do centro. */
 function drawContributions(aim: AimState): void {
   const cx = screenW() / 2;
   const cy = screenH() / 2;
@@ -259,8 +272,17 @@ function render(now: number): void {
 
 // ---------- Boot ----------
 
-async function openCamera(): Promise<MediaStream> {
-  const base = { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' };
+/** Resoluções tentadas, da melhor para a mais leve. Mais pixels nos olhos = landmarks menos tremidos. */
+const CAMERA_RESOLUTIONS = [
+  { width: 1280, height: 720 },
+  { width: 640, height: 480 },
+];
+/** Abaixo disso, depois de estabilizar, a resolução alta é trocada pela seguinte. */
+const MIN_TRACKING_FPS = 25;
+const FPS_CHECK_DELAY_MS = 4000;
+
+async function openCamera(resolution: { width: number; height: number }): Promise<MediaStream> {
+  const base = { width: { ideal: resolution.width }, height: { ideal: resolution.height }, facingMode: 'user' };
   try {
     return await navigator.mediaDevices.getUserMedia({ video: { ...base, frameRate: { ideal: 30, min: 25 } }, audio: false });
   } catch (err) {
@@ -270,12 +292,39 @@ async function openCamera(): Promise<MediaStream> {
   }
 }
 
+async function useCamera(index: number): Promise<void> {
+  (video.srcObject as MediaStream | null)?.getTracks().forEach((track) => track.stop());
+  video.srcObject = await openCamera(CAMERA_RESOLUTIONS[index]);
+  await video.play();
+}
+
+/**
+ * Começa na resolução mais alta; se o tracking não sustentar MIN_TRACKING_FPS, desce um nível.
+ * A resolução em uso aparece no painel, ao lado do FPS.
+ */
+function scheduleFpsCheck(index: number): void {
+  if (index >= CAMERA_RESOLUTIONS.length - 1) return;
+  setTimeout(async () => {
+    const fps = trackingFps.value(performance.now());
+    if (fps >= MIN_TRACKING_FPS) return;
+    const next = CAMERA_RESOLUTIONS[index + 1];
+    console.warn(`[câmera] tracking a ${fps} FPS em ${video.videoWidth}×${video.videoHeight}; trocando para ${next.width}×${next.height}.`);
+    try {
+      video.cancelVideoFrameCallback(frameCallbackHandle);
+      await useCamera(index + 1);
+      scheduleNextFrame();
+      scheduleFpsCheck(index + 1);
+    } catch (err) {
+      console.error('[câmera] falha ao trocar de resolução', err);
+    }
+  }, FPS_CHECK_DELAY_MS);
+}
+
 async function start(): Promise<void> {
   requestAnimationFrame(render);
   try {
     statusEl.textContent = 'Pedindo acesso à webcam…';
-    video.srcObject = await openCamera();
-    await video.play();
+    await useCamera(0);
 
     statusEl.textContent = 'Carregando Face Landmarker…';
     await tracker.init();
@@ -283,7 +332,8 @@ async function start(): Promise<void> {
     statusEl.textContent = store.invalidatedReason ?? '';
     if (store.model) scene.showFreeAim();
     else scene.start();
-    video.requestVideoFrameCallback(onVideoFrame);
+    scheduleNextFrame();
+    scheduleFpsCheck(0);
   } catch (err) {
     console.error(err);
     statusEl.textContent = `Erro: ${err instanceof Error ? err.message : String(err)}`;

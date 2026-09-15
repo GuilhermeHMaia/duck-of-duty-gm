@@ -21,6 +21,8 @@ export interface CalibrationModel {
   meanResidual: number;
   createdAt: number;
   screenSize: { w: number; h: number };
+  /** Correção somada à mira, definida por "Recentralizar" (olhar o centro). 0 logo após calibrar. */
+  aimBias?: { x: number; y: number };
 }
 
 export interface CalibrationSample {
@@ -152,6 +154,7 @@ export class CalibrationStore {
       meanResidual,
       createdAt: Date.now(),
       screenSize: { w: screenW, h: screenH },
+      aimBias: { x: 0, y: 0 },
     };
 
     logCalibrationDiagnostics(samples, lambda, screenW, screenH); // TEMPORÁRIO
@@ -165,6 +168,17 @@ export class CalibrationStore {
       console.warn('[calibração] não foi possível salvar no localStorage', err);
     }
     return model;
+  }
+
+  /** Guarda a correção de "Recentralizar" no modelo atual (e no localStorage). */
+  setAimBias(bias: { x: number; y: number }): void {
+    if (!this.model) return;
+    this.model.aimBias = bias;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.model));
+    } catch (err) {
+      console.warn('[calibração] não foi possível salvar a recentralização', err);
+    }
   }
 
   /** Posição ocular prevista, em px CSS da janela. null sem modelo. */

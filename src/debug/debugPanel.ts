@@ -226,7 +226,7 @@ export class DebugPanel {
       ? `yaw ${fmtDeg(pose.yaw)}   pitch ${fmtDeg(pose.pitch)}   roll ${fmtDeg(pose.roll)}`
       : 'yaw —   pitch —   roll —';
 
-    this.fpsEl.textContent = `tracking ${trackingFps.toFixed(1)}   ·   rAF ${rafFps.toFixed(1)}`;
+    this.fpsEl.textContent = `tracking ${trackingFps.toFixed(1)}   ·   rAF ${rafFps.toFixed(1)}   ·   ${this.video.videoWidth}×${this.video.videoHeight}`;
 
     const b = frame?.blendshapes ?? {};
     setLed(this.leds['winkLeft'], !!frame?.eyeState.winkLeft);

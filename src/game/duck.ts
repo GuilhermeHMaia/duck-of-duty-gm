@@ -42,6 +42,8 @@ export class Duck {
     private readonly speed: number,
     /** Intervalo [mín, máx] entre mudanças de direção; maior = voo mais previsível. */
     private readonly turnIntervalMs: readonly [number, number],
+    /** Blindado: tiro normal ricocheteia; só o super derruba. */
+    readonly armored = false,
   ) {
     this.x = screenW * (0.15 + Math.random() * 0.7);
     this.y = groundY - RADIUS;
