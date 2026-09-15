@@ -7,7 +7,7 @@ import { median, type CalibrationSample, type CalibrationStore } from './calibra
 // ---------- Parâmetros da coleta ----------
 const SETTLE_MS = 400;            // atraso entre o alvo aparecer e a captura ser habilitada
 /** Gatilho: os dois olhos fechados (bothClosed) por pelo menos isso. Piscada natural fica em ~100–150 ms. */
-const BLINK_TRIGGER_MS = 200;
+export const BLINK_TRIGGER_MS = 200;
 /** Na tela de resultado, olhos fechados por isso = repetir o pior alvo. */
 const BLINK_LONG_MS = 1000;
 const WINDOW_START_MS = 500;      // janela de amostra: de 500 ms…
@@ -42,6 +42,8 @@ export interface DiscardInfo {
 
 export interface CalibrationSceneHooks {
   setPanelCollapsed(collapsed: boolean): void;
+  /** Piscada deliberada na mira livre: começa o jogo. */
+  startGame(): void;
 }
 
 /**
@@ -144,6 +146,9 @@ export class CalibrationScene {
       case 'intro':
         this.beginRun(shuffledPasses(), now);
         break;
+      case 'free':
+        this.hooks.startGame();
+        break;
       case 'target':
         if (now < this.appearedAt + SETTLE_MS) return; // captura ainda não habilitada
         this.capture(closureStart, screenW, screenH, now);
@@ -194,6 +199,7 @@ export class CalibrationScene {
           const t = gridTarget(i, screenW, screenH);
           drawTarget(ctx, t.x, t.y, TARGET_RADIUS, 1, aim?.snappedTargetId === t.id);
         }
+        drawText(ctx, screenW / 2, 40, 'Mira livre · feche os dois olhos por um instante para jogar', 18, '#94a3b8');
         break;
       }
     }

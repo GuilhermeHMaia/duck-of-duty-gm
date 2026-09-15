@@ -3,6 +3,7 @@ import { CalibrationScene } from './calibration/calibrationScene';
 import { CalibrationStore } from './calibration/calibrationStore';
 import { DebugPanel } from './debug/debugPanel';
 import { Aiming, type AimState } from './game/aiming';
+import { DuckGame } from './game/duckGame';
 import { FaceTracker } from './tracking/faceTracker';
 import { FrameBuffer } from './tracking/frameBuffer';
 import type { DebugConfig, FaceFrame } from './types';
@@ -26,6 +27,11 @@ const config: DebugConfig = {
   ridgeLambda: 0.001,
   cursorMinCutoff: 1.0,
   cursorBeta: 0.02,
+  duckSpeed: 220,
+  duckEscapeMs: 6000,
+  focusFillPerSec: 1.25,
+  focusDecayPerSec: 0.8,
+  focusToShoot: 1.0,
 };
 
 const TRAIL_LENGTH = 12;
@@ -62,15 +68,25 @@ const buffer = new FrameBuffer();
 const store = new CalibrationStore(config);
 store.load(screenW(), screenH());
 const aiming = new Aiming(config, store);
+/** Cena ativa: o Estande / mira livre (calibração) ou o jogo. */
+let activeScene: 'calibration' | 'game' = 'calibration';
+const game = new DuckGame(config);
+
 const panel = new DebugPanel(config, video, {
   onRecalibrate: () => {
     statusEl.textContent = '';
+    activeScene = 'calibration';
     scene.start();
   },
   onClearCalibration: () => store.clear(),
 });
 const scene = new CalibrationScene(store, buffer, {
   setPanelCollapsed: (collapsed) => panel.setCollapsed(collapsed),
+  startGame: () => {
+    activeScene = 'game';
+    panel.setCollapsed(true);
+    game.start();
+  },
 });
 
 const trackingFps = new FpsCounter();
@@ -95,7 +111,7 @@ window.addEventListener('resize', () => {
     statusEl.textContent = store.invalidatedReason ?? '';
   }
   // Estande em andamento: as posições dos alvos mudaram, as amostras já coletadas não servem mais.
-  if (scene.hidesCursor()) scene.start();
+  if (activeScene === 'calibration' && scene.hidesCursor()) scene.start();
 });
 
 // ---------- Loop de tracking: um detect por frame novo da câmera ----------
@@ -111,8 +127,10 @@ function onVideoFrame(now: number): void {
     pushTrail(trails.filtered, frame.gazeFiltered);
     pushTrail(trails.delayed, buffer.getFrameAgo(config.preBlinkBufferMs)?.gazeFiltered ?? null);
 
-    scene.onFrame(frame, screenW(), screenH());
-    aiming.update(frame, screenW(), screenH(), scene.getTargets(screenW(), screenH()));
+    const targets = activeScene === 'game' ? game.getTargets() : scene.getTargets(screenW(), screenH());
+    const aim = aiming.update(frame, screenW(), screenH(), targets);
+    if (activeScene === 'game') game.onFrame(frame, aim);
+    else scene.onFrame(frame, screenW(), screenH());
 
     trackingFps.tick(performance.now());
   } catch (err) {
@@ -208,7 +226,8 @@ function render(now: number): void {
   ctx.fillRect(0, 0, screenW(), screenH());
 
   const aim = aiming.getState();
-  scene.render(ctx, now, screenW(), screenH(), aim);
+  if (activeScene === 'game') game.render(ctx, now, screenW(), screenH(), aim);
+  else scene.render(ctx, now, screenW(), screenH(), aim);
 
   if (!panel.isCollapsed()) {
     drawTrail(trails.delayed, '250, 204, 21'); // amarelo — gaze de preBlinkBufferMs atrás
@@ -216,7 +235,7 @@ function render(now: number): void {
     drawTrail(trails.filtered, '59, 130, 246'); // azul — gaze filtrado (1€)
     if (aim) drawContributions(aim);
   }
-  if (aim && !scene.hidesCursor()) drawCursor(aim);
+  if (aim && (activeScene === 'game' || !scene.hidesCursor())) drawCursor(aim);
 
   panel.render(now, latestFrame, tracker.getLandmarks(), trackingFps.value(now), rafFps.value(now), {
     status: store.status,

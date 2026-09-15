@@ -39,6 +39,11 @@ const SLIDERS: { key: keyof DebugConfig; min: number; max: number; step: number;
   { key: 'ridgeLambda', min: -6, max: 0, step: 0.1, log: true }, // 1e-6 … 1
   { key: 'cursorMinCutoff', min: 0.01, max: 5, step: 0.01 },
   { key: 'cursorBeta', min: 0, max: 1, step: 0.001 },
+  { key: 'duckSpeed', min: 50, max: 600, step: 10 },
+  { key: 'duckEscapeMs', min: 2000, max: 15000, step: 500 },
+  { key: 'focusFillPerSec', min: 0.1, max: 5, step: 0.05 },
+  { key: 'focusDecayPerSec', min: 0, max: 5, step: 0.05 },
+  { key: 'focusToShoot', min: 0, max: 1, step: 0.05 },
 ];
 
 export interface CalibrationPanelInfo {

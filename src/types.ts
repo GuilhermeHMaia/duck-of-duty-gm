@@ -33,4 +33,9 @@ export interface DebugConfig {
   ridgeLambda: number;           // 0.001
   cursorMinCutoff: number;       // 1.0
   cursorBeta: number;            // 0.02
+  duckSpeed: number;             // 220   (px/s na rodada 1; +25% por rodada)
+  duckEscapeMs: number;          // 6000  (tempo de voo antes de o pato fugir)
+  focusFillPerSec: number;       // 1.25  (foco ganho por segundo com a mira grudada num pato)
+  focusDecayPerSec: number;      // 0.8   (foco perdido por segundo fora dos patos)
+  focusToShoot: number;          // 1.0   (foco mínimo para o tiro derrubar)
 }
