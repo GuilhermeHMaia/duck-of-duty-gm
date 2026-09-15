@@ -69,7 +69,7 @@ const panel = new DebugPanel(config, video, {
   },
   onClearCalibration: () => store.clear(),
 });
-const scene = new CalibrationScene(config, store, buffer, {
+const scene = new CalibrationScene(store, buffer, {
   setPanelCollapsed: (collapsed) => panel.setCollapsed(collapsed),
 });
 

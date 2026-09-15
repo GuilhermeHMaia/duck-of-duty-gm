@@ -4,6 +4,8 @@ import type { DebugConfig, FaceFrame } from '../types';
 
 /** Alcance angular (após a zona morta) que leva a contribuição da cabeça do centro até a borda. */
 const HEAD_RANGE_DEG = 20;
+/** Quanto histórico da contribuição do olho guardar para o congelamento na piscada. */
+const EYE_HISTORY_MS = 1000;
 
 export interface AimTarget {
   id: string;
@@ -38,7 +40,11 @@ export interface AimState {
 export class Aiming {
   private readonly filterX: OneEuroFilter;
   private readonly filterY: OneEuroFilter;
-  private lastEyeOffset: { x: number; y: number } | null = null;
+  /** Previsões do olho (deslocamento do centro, sem clamp) dos frames com olhos abertos. */
+  private eyeHistory: { t: number; offset: { x: number; y: number } }[] = [];
+  /** Deslocamento congelado durante uma piscada, e até quando segurar. */
+  private frozenEye: { x: number; y: number } | null = null;
+  private holdUntil = -Infinity;
   private snappedId: string | null = null;
   private state: AimState | null = null;
 
@@ -80,19 +86,42 @@ export class Aiming {
       y: -pitch * (cy / HEAD_RANGE_DEG),
     };
 
-    // 2. Olho. Com o olho fechado (features null), congela o último valor válido.
+    // 2. Olho, com congelamento na piscada.
+    // O modelo de Y usa pálpebra e eyeLook; no começo de uma piscada a pálpebra desce
+    // antes de o olho contar como fechado, e a mira "pularia" para baixo. Então, assim
+    // que qualquer olho passa de doubleBlinkThreshold (ou as features somem), a
+    // contribuição do olho congela no valor de preBlinkBufferMs ANTES disso, e só volta
+    // a seguir o olho preBlinkBufferMs depois que os olhos reabrem.
     let eyeOffset: { x: number; y: number } | null = null;
     if (model) {
-      const eye = frame.gazeFeatures ? this.store.apply(frame.gazeFeatures) : null;
-      if (eye) {
-        this.lastEyeOffset = {
-          x: clamp(eye.x - cx, -c.eyeMaxOffset, c.eyeMaxOffset),
-          y: clamp(eye.y - cy, -c.eyeMaxOffset, c.eyeMaxOffset),
-        };
+      const now = frame.timestamp;
+      const blinkL = frame.blendshapes.eyeBlinkLeft ?? 0;
+      const blinkR = frame.blendshapes.eyeBlinkRight ?? 0;
+      const closing = !frame.gazeFeatures || blinkL > c.doubleBlinkThreshold || blinkR > c.doubleBlinkThreshold;
+
+      if (closing) {
+        if (now >= this.holdUntil || !this.frozenEye) this.frozenEye = this.eyeOffsetAgo(now, c.preBlinkBufferMs);
+        this.holdUntil = now + c.preBlinkBufferMs;
       }
-      eyeOffset = this.lastEyeOffset;
+
+      let current: { x: number; y: number } | null;
+      if (now < this.holdUntil) {
+        current = this.frozenEye;
+      } else {
+        this.frozenEye = null;
+        const eye = this.store.apply(frame.gazeFeatures!);
+        current = eye ? { x: eye.x - cx, y: eye.y - cy } : null;
+        if (current) {
+          this.eyeHistory.push({ t: now, offset: current });
+          while (this.eyeHistory.length > 0 && this.eyeHistory[0].t < now - EYE_HISTORY_MS) this.eyeHistory.shift();
+        }
+      }
+      eyeOffset = current
+        ? { x: clamp(current.x, -c.eyeMaxOffset, c.eyeMaxOffset), y: clamp(current.y, -c.eyeMaxOffset, c.eyeMaxOffset) }
+        : null;
     } else {
-      this.lastEyeOffset = null;
+      this.eyeHistory = [];
+      this.frozenEye = null;
     }
 
     // 3. Fusão.
@@ -145,6 +174,21 @@ export class Aiming {
       hasModel: !!model,
     };
     return this.state;
+  }
+
+  /** Contribuição do olho mais próxima de `ms` antes de `now`, entre os frames com olhos abertos. */
+  private eyeOffsetAgo(now: number, ms: number): { x: number; y: number } | null {
+    const target = now - ms;
+    let best: { x: number; y: number } | null = null;
+    let bestDist = Infinity;
+    for (const h of this.eyeHistory) {
+      const d = Math.abs(h.t - target);
+      if (d < bestDist) {
+        bestDist = d;
+        best = h.offset;
+      }
+    }
+    return best;
   }
 }
 

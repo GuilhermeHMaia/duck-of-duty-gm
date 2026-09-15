@@ -1,11 +1,15 @@
 import type { AimState, AimTarget } from '../game/aiming';
 import type { FrameBuffer } from '../tracking/frameBuffer';
 import { GAZE_FEATURE_NAMES } from '../tracking/gazeEstimator';
-import type { DebugConfig, FaceFrame } from '../types';
+import type { FaceFrame } from '../types';
 import { median, type CalibrationSample, type CalibrationStore } from './calibrationStore';
 
 // ---------- Parâmetros da coleta ----------
 const SETTLE_MS = 400;            // atraso entre o alvo aparecer e a captura ser habilitada
+/** Gatilho: os dois olhos fechados (bothClosed) por pelo menos isso. Piscada natural fica em ~100–150 ms. */
+const BLINK_TRIGGER_MS = 200;
+/** Na tela de resultado, olhos fechados por isso = repetir o pior alvo. */
+const BLINK_LONG_MS = 1000;
 const WINDOW_START_MS = 500;      // janela de amostra: de 500 ms…
 const WINDOW_END_MS = 150;        // …a 150 ms antes do início do fechamento
 const MIN_WINDOW_FRAMES = 4;      // menos que isso, mediana e desvio não significam nada
@@ -50,7 +54,10 @@ export class CalibrationScene {
   private currentPoint = 0;
   private appearedAt = 0;
   private fallStart = 0;
-  private armed = false;
+  /** Timestamp do primeiro frame com os dois olhos fechados na piscada atual; null com olhos abertos. */
+  private closedSince: number | null = null;
+  /** A piscada atual já disparou uma ação (uma piscada = uma ação). */
+  private closureHandled = false;
   private samples: CalibrationSample[] = [];
   private totalInRun = 0;
   private repeating: number | null = null;
@@ -61,7 +68,6 @@ export class CalibrationScene {
   lastDiscard: DiscardInfo | null = null;
 
   constructor(
-    private readonly config: DebugConfig,
     private readonly store: CalibrationStore,
     private readonly buffer: FrameBuffer,
     private readonly hooks: CalibrationSceneHooks,
@@ -76,7 +82,8 @@ export class CalibrationScene {
     this.worstPoint = null;
     this.resultError = null;
     this.lastDiscard = null;
-    this.armed = false;
+    this.closedSince = null;
+    this.closureHandled = true; // uma piscada já em curso ao abrir o Estande não conta
     this.hooks.setPanelCollapsed(true);
   }
 
@@ -97,34 +104,49 @@ export class CalibrationScene {
 
   /** Chamado a cada frame de tracking (já empurrado no buffer). */
   onFrame(frame: FaceFrame, screenW: number, screenH: number): void {
-    const c = this.config;
-    const blinkL = frame.blendshapes.eyeBlinkLeft ?? 0;
-    const blinkR = frame.blendshapes.eyeBlinkRight ?? 0;
-    // Rearma só depois que o wink termina (a diferença entre os olhos volta abaixo do
-    // limiar) e sem piscada dupla em curso: um wink = uma ação.
-    if (frame.faceDetected && Math.abs(blinkL - blinkR) <= c.winkThreshold && !frame.eyeState.bothClosed) {
-      this.armed = true;
+    // Gatilho = piscada deliberada: os dois olhos fechados (bothClosed, doubleBlinkThreshold)
+    // por pelo menos BLINK_TRIGGER_MS. Uma piscada dispara no máximo uma ação.
+    const t = frame.timestamp;
+    const now = performance.now();
+
+    if (frame.faceDetected && frame.eyeState.bothClosed) {
+      if (this.closedSince === null) {
+        this.closedSince = t;
+        this.closureHandled = false;
+      }
+      const held = t - this.closedSince;
+      if (this.closureHandled) return;
+
+      if (this.phase === 'results') {
+        // Resultado: segurar 1 s repete o pior alvo (a decisão "continuar" fica para a reabertura).
+        if (this.worstPoint !== null && held >= BLINK_LONG_MS) {
+          this.closureHandled = true;
+          this.repeatPoint(this.worstPoint, now);
+        }
+      } else if (held >= BLINK_TRIGGER_MS) {
+        this.closureHandled = true;
+        this.onDeliberateBlink(this.closedSince, screenW, screenH, now);
+      }
+      return;
     }
 
-    const wink = frame.eyeState.winkLeft ? 'left' : frame.eyeState.winkRight ? 'right' : null;
-    if (!wink || !this.armed) return;
-    this.armed = false;
+    // Olhos reabriram.
+    if (this.closedSince !== null) {
+      const held = t - this.closedSince;
+      if (!this.closureHandled && this.phase === 'results' && held >= BLINK_TRIGGER_MS) this.phase = 'free';
+      this.closedSince = null;
+      this.closureHandled = false;
+    }
+  }
 
-    const now = performance.now();
+  private onDeliberateBlink(closureStart: number, screenW: number, screenH: number, now: number): void {
     switch (this.phase) {
       case 'intro':
         this.beginRun(shuffledPasses(), now);
         break;
       case 'target':
         if (now < this.appearedAt + SETTLE_MS) return; // captura ainda não habilitada
-        this.capture(wink, screenW, screenH, now);
-        break;
-      case 'results':
-        if (this.worstPoint !== null && wink === 'left') {
-          this.repeatPoint(this.worstPoint, now);
-        } else {
-          this.phase = 'free';
-        }
+        this.capture(closureStart, screenW, screenH, now);
         break;
       default:
         break;
@@ -140,7 +162,7 @@ export class CalibrationScene {
       case 'intro':
         drawText(ctx, screenW / 2, screenH / 2 - 30, 'Estande de Treino', 44, '#f8fafc');
         drawText(ctx, screenW / 2, screenH / 2 + 20, 'acerte os alvos para calibrar sua mira', 22, '#cbd5e1');
-        drawText(ctx, screenW / 2, screenH / 2 + 70, 'Melhor de duas rodadas · dê um wink para começar', 18, '#94a3b8');
+        drawText(ctx, screenW / 2, screenH / 2 + 70, 'Melhor de duas rodadas · feche os dois olhos por um instante para começar', 18, '#94a3b8');
         break;
 
       case 'target': {
@@ -227,8 +249,8 @@ export class CalibrationScene {
 
   // ---------- Coleta ----------
 
-  private capture(wink: 'left' | 'right', screenW: number, screenH: number, now: number): void {
-    const result = this.buildSample(wink, screenW, screenH);
+  private capture(closureStart: number, screenW: number, screenH: number, now: number): void {
+    const result = this.buildSample(closureStart, screenW, screenH);
     if (typeof result === 'string') {
       // Descartado: registra o motivo no painel e o mesmo alvo "reaparece", sem aviso na cena.
       this.lastDiscard = { reason: result, at: now, pointIndex: this.currentPoint };
@@ -240,27 +262,19 @@ export class CalibrationScene {
     this.fallStart = now;
   }
 
-  /** Monta a amostra a partir da janela pré-wink do frameBuffer, ou devolve o motivo do descarte. */
-  private buildSample(wink: 'left' | 'right', screenW: number, screenH: number): CalibrationSample | string {
-    const c = this.config;
+  /**
+   * Monta a amostra a partir da janela antes da piscada no frameBuffer, ou devolve o
+   * motivo do descarte. closureStart = timestamp do primeiro frame com os dois olhos fechados.
+   */
+  private buildSample(closureStart: number, screenW: number, screenH: number): CalibrationSample | string {
     const frames = this.buffer.getFrames();
     if (frames.length === 0) return 'Buffer vazio';
-
-    // Início do fechamento: primeiro frame da sequência consecutiva que confirmou o wink.
-    const closing = (f: FaceFrame): boolean => {
-      const l = f.blendshapes.eyeBlinkLeft ?? 0;
-      const r = f.blendshapes.eyeBlinkRight ?? 0;
-      return wink === 'left' ? l - r > c.winkThreshold : r - l > c.winkThreshold;
-    };
-    let i = frames.length - 1;
-    while (i >= 0 && frames[i].faceDetected && closing(frames[i])) i--;
-    const closureStart = frames[Math.min(i + 1, frames.length - 1)].timestamp;
 
     const from = closureStart - WINDOW_START_MS;
     const to = closureStart - WINDOW_END_MS;
 
     if (from < this.appearedAt + SETTLE_MS) {
-      return 'Wink cedo demais: a janela de 500 ms começa antes do olhar se acomodar no alvo';
+      return 'Piscada cedo demais: a janela de 500 ms começa antes do olhar se acomodar no alvo';
     }
     if (frames[0].timestamp > from) return 'O buffer não cobre a janela de 500 ms';
 
@@ -334,7 +348,7 @@ export class CalibrationScene {
     if (this.resultError || !model) {
       drawText(ctx, cx, cy - 20, 'Não foi possível calibrar', 36, '#fca5a5');
       drawText(ctx, cx, cy + 25, this.resultError ?? '', 16, '#cbd5e1');
-      drawText(ctx, cx, cy + 65, 'Dê um wink para continuar', 18, '#94a3b8');
+      drawText(ctx, cx, cy + 65, 'Feche os dois olhos por um instante para continuar', 18, '#94a3b8');
       return;
     }
     drawText(ctx, cx, cy - 80, 'Estande concluído', 40, '#f8fafc');
@@ -343,9 +357,9 @@ export class CalibrationScene {
     if (this.worstPoint !== null) {
       const r = Math.round(model.residuals[this.worstPoint]);
       drawText(ctx, cx, cy + 75, `O alvo ${this.worstPoint + 1} ficou impreciso (${r} px)`, 20, '#fca5a5');
-      drawText(ctx, cx, cy + 110, 'Wink esquerdo: repetir esse alvo  ·  Wink direito: continuar', 18, '#94a3b8');
+      drawText(ctx, cx, cy + 110, 'Piscada rápida: continuar  ·  Olhos fechados por 1 s: repetir esse alvo', 18, '#94a3b8');
     } else {
-      drawText(ctx, cx, cy + 75, 'Dê um wink para continuar', 18, '#94a3b8');
+      drawText(ctx, cx, cy + 75, 'Feche os dois olhos por um instante para continuar', 18, '#94a3b8');
     }
   }
 }
