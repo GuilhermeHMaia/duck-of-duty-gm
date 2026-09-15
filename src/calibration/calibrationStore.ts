@@ -3,17 +3,19 @@ import { fitRidge, predict } from './ridgeRegression';
 
 type HeadPose = FaceFrame['headPose'];
 
-// v2: modelo linear de 5 termos (v1 tinha 11 termos; pesos incompatíveis).
-export const CALIBRATION_VERSION = 2;
+// v3: features por eixo (X: íris; Y: íris + pálpebra + eyeLook). v2 era linear 4 features nos dois eixos.
+export const CALIBRATION_VERSION = 3;
 const STORAGE_KEY = `duck-of-duty.calibration.v${CALIBRATION_VERSION}`;
 
 export interface CalibrationModel {
   version: number;
   weightsX: number[];
   weightsY: number[];
-  /** Média e desvio de cada termo no treino, para padronizar (posição 0 = bias, fica 0/1). */
-  featureMean: number[];
-  featureStd: number[];
+  /** Média e desvio de cada termo no treino, por eixo, para padronizar (posição 0 = bias, fica 0/1). */
+  featureMeanX: number[];
+  featureStdX: number[];
+  featureMeanY: number[];
+  featureStdY: number[];
   headBaseline: { yaw: number; pitch: number; roll: number };
   residuals: number[];        // erro em px por ponto da grade (leave-one-out)
   meanResidual: number;
@@ -22,32 +24,32 @@ export interface CalibrationModel {
 }
 
 export interface CalibrationSample {
-  /** Features base [lx, ly, rx, ry] (mediana da janela). */
+  /** Features base, 8 valores na ordem de GAZE_FEATURE_NAMES (mediana da janela). */
   features: number[];
   headPose: HeadPose;
   /** Centro do alvo, em px CSS da janela. */
   target: { x: number; y: number };
   /** Índice 0–8 na grade 3×3. */
   pointIndex: number;
-  /** DIAGNÓSTICO TEMPORÁRIO: medianas na janela de sinais verticais candidatos (pálpebras, eyeLook*). */
-  extra?: Record<string, number>;
 }
 
 /** absent: sem modelo · loaded: veio do localStorage · trained: treinado nesta sessão. */
 export type CalibrationStatus = 'absent' | 'loaded' | 'trained';
 
+type Expand = (base: number[]) => number[];
+
 /**
- * Vetor passado à regressão: [1, lx, ly, rx, ry]  (linear, 5 termos).
+ * Termos da regressão de X de tela: [1, lx, rx]  (só a íris).
+ * Termos da regressão de Y de tela: [1, ly, ry, lidUpL, lidUpR, lookDUL, lookDUR].
  *
- * A especificação original pedia 11 termos (com os quadráticos lx², ly², rx², ry²,
- * lx·ly, rx·ry). Com as amostras reais (18, sinal vertical fraco), os quadráticos
- * ajustavam ruído: leave-one-out de 305 px contra 149 px do linear. Ver
- * QUADRATIC_REFERENCE no diagnóstico para comparar a cada calibração.
+ * Histórico, medido por leave-one-out nas amostras reais:
+ *  - especificação original, 11 termos quadráticos nos dois eixos: 305 px (ajustava ruído);
+ *  - linear [lx, ly, rx, ry] nos dois eixos: 134–157 px, quase todo o erro em Y;
+ *  - por eixo, como aqui: 106 px (X 61, Y 73). A íris sozinha distingue mal as
+ *    linhas da grade; pálpebra superior e eyeLook completam o sinal vertical.
  */
-export function expandFeatures(base: number[]): number[] {
-  const [lx, ly, rx, ry] = base;
-  return [1, lx, ly, rx, ry];
-}
+export const expandX: Expand = (b) => [1, b[0], b[2]];
+export const expandY: Expand = (b) => [1, b[1], b[3], b[4], b[5], b[6], b[7]];
 
 export function median(values: number[]): number {
   const s = [...values].sort((a, b) => a - b);
@@ -103,7 +105,7 @@ export class CalibrationStore {
   /** Treina com todas as amostras, calcula os resíduos leave-one-out e a baseline da cabeça, e persiste. */
   fit(samples: CalibrationSample[], screenW: number, screenH: number): CalibrationModel {
     const lambda = this.config.ridgeLambda;
-    const full = trainWeights(samples, lambda);
+    const full = trainWeights(samples, lambda, expandX, expandY);
 
     // Leave-one-out POR PONTO DA GRADE: tira as duas amostras do ponto, treina com o
     // resto e mede a distância (px) entre a previsão e o alvo, na média das amostras do ponto.
@@ -115,7 +117,7 @@ export class CalibrationStore {
         residuals.push(NaN);
         continue;
       }
-      const w = trainWeights(rest, lambda);
+      const w = trainWeights(rest, lambda, expandX, expandY);
       const errors = heldOut.map((s) => {
         const p = applyWeights(w, s.features);
         return Math.hypot(p.x - s.target.x, p.y - s.target.y);
@@ -135,10 +137,12 @@ export class CalibrationStore {
 
     const model: CalibrationModel = {
       version: CALIBRATION_VERSION,
-      weightsX: full.weightsX,
-      weightsY: full.weightsY,
-      featureMean: full.mean,
-      featureStd: full.std,
+      weightsX: full.x.weights,
+      weightsY: full.y.weights,
+      featureMeanX: full.x.mean,
+      featureStdX: full.x.std,
+      featureMeanY: full.y.mean,
+      featureStdY: full.y.std,
       headBaseline,
       residuals,
       meanResidual,
@@ -163,24 +167,42 @@ export class CalibrationStore {
   apply(features: number[]): { x: number; y: number } | null {
     const m = this.model;
     if (!m) return null;
-    return applyWeights({ weightsX: m.weightsX, weightsY: m.weightsY, mean: m.featureMean, std: m.featureStd }, features);
+    return applyWeights(
+      {
+        x: { weights: m.weightsX, mean: m.featureMeanX, std: m.featureStdX, expand: expandX },
+        y: { weights: m.weightsY, mean: m.featureMeanY, std: m.featureStdY, expand: expandY },
+      },
+      features,
+    );
   }
 }
 
-interface Weights {
-  weightsX: number[];
-  weightsY: number[];
+interface AxisWeights {
+  weights: number[];
   mean: number[];
   std: number[];
+  expand: Expand;
+}
+
+interface Weights {
+  x: AxisWeights;
+  y: AxisWeights;
 }
 
 /**
- * Padroniza os 10 termos não-bias (média 0, desvio 1 no conjunto de treino) e
- * resolve duas ridges independentes, uma para X e outra para Y de tela.
- * Sem padronizar, features em escalas diferentes (lx varia ~0,14, ly ~0,06) seriam
- * penalizadas de forma desigual pelo mesmo λ.
+ * Duas ridges independentes, uma para X e outra para Y de tela, cada uma com seus
+ * próprios termos. Antes de resolver, padroniza os termos não-bias (média 0, desvio 1
+ * no conjunto de treino): sem isso, features em escalas diferentes (íris ~0,1,
+ * eyeLook ~0,4) seriam penalizadas de forma desigual pelo mesmo λ.
  */
-function trainWeights(samples: CalibrationSample[], lambda: number, expand = expandFeatures): Weights {
+function trainWeights(samples: CalibrationSample[], lambda: number, expX: Expand, expY: Expand): Weights {
+  return {
+    x: trainAxis(samples, lambda, expX, (s) => s.target.x),
+    y: trainAxis(samples, lambda, expY, (s) => s.target.y),
+  };
+}
+
+function trainAxis(samples: CalibrationSample[], lambda: number, expand: Expand, target: (s: CalibrationSample) => number): AxisWeights {
   const rows = samples.map((s) => expand(s.features));
   const p = rows[0].length;
   const mean = new Array(p).fill(0);
@@ -192,17 +214,12 @@ function trainWeights(samples: CalibrationSample[], lambda: number, expand = exp
     std[j] = variance > 1e-18 ? Math.sqrt(variance) : 1;
   }
   const X = rows.map((r) => standardize(r, mean, std));
-  return {
-    weightsX: fitRidge(X, samples.map((s) => s.target.x), lambda),
-    weightsY: fitRidge(X, samples.map((s) => s.target.y), lambda),
-    mean,
-    std,
-  };
+  return { weights: fitRidge(X, samples.map(target), lambda), mean, std, expand };
 }
 
-function applyWeights(w: Weights, base: number[], expand = expandFeatures): { x: number; y: number } {
-  const f = standardize(expand(base), w.mean, w.std);
-  return { x: predict(w.weightsX, f), y: predict(w.weightsY, f) };
+function applyWeights(w: Weights, base: number[]): { x: number; y: number } {
+  const axis = (a: AxisWeights) => predict(a.weights, standardize(a.expand(base), a.mean, a.std));
+  return { x: axis(w.x), y: axis(w.y) };
 }
 
 function standardize(row: number[], mean: number[], std: number[]): number[] {
@@ -213,24 +230,24 @@ function standardize(row: number[], mean: number[], std: number[]): number[] {
 
 /**
  * Imprime no Console, a cada treino:
- *  1. erro dentro do treino × leave-one-out, para o modelo linear atual e o quadrático de referência;
+ *  1. erro dentro do treino × leave-one-out, modelo atual × anterior;
  *  2. erro separado em X e em Y;
- *  3. consistência das features: distância entre as 2 amostras do MESMO alvo × entre alvos diferentes;
- *  4. JSON com as amostras, para copiar e analisar fora do navegador.
+ *  3. quanto cada sinal vertical separa as linhas da grade;
+ *  4. JSON compacto com as amostras, para copiar e analisar fora do navegador.
  */
 function logCalibrationDiagnostics(samples: CalibrationSample[], lambda: number, screenW: number, screenH: number): void {
-  const QUADRATIC_REFERENCE = ([lx, ly, rx, ry]: number[]) => [1, lx, ly, rx, ry, lx * lx, ly * ly, rx * rx, ry * ry, lx * ly, rx * ry];
-  const models = { 'linear (5) — atual': expandFeatures, 'quadrático (11) — referência': QUADRATIC_REFERENCE };
   const avg = (v: number[]) => v.reduce((a, b) => a + b, 0) / Math.max(v.length, 1);
+  const iris4: Expand = (b) => [1, b[0], b[1], b[2], b[3]];
+  const models: Record<string, [Expand, Expand]> = {
+    'atual: X íris · Y íris+pálpebra+eyeLook': [expandX, expandY],
+    'anterior: íris (4) nos dois eixos': [iris4, iris4],
+  };
 
   const table: Record<string, Record<string, string>> = {};
-  for (const [name, expand] of Object.entries(models)) {
-    const all = trainWeights(samples, lambda, expand);
-    const inSample = samples.map((s) => applyWeights(all, s.features, expand));
-    const looPred = samples.map((s) => {
-      const w = trainWeights(samples.filter((o) => o.pointIndex !== s.pointIndex), lambda, expand);
-      return applyWeights(w, s.features, expand);
-    });
+  for (const [name, [ex, ey]] of Object.entries(models)) {
+    const all = trainWeights(samples, lambda, ex, ey);
+    const inSample = samples.map((s) => applyWeights(all, s.features));
+    const looPred = samples.map((s) => applyWeights(trainWeights(samples.filter((o) => o.pointIndex !== s.pointIndex), lambda, ex, ey), s.features));
     const err = (preds: { x: number; y: number }[], f: (p: { x: number; y: number }, s: CalibrationSample) => number) =>
       avg(preds.map((p, i) => f(p, samples[i]))).toFixed(0);
     table[name] = {
@@ -241,74 +258,35 @@ function logCalibrationDiagnostics(samples: CalibrationSample[], lambda: number,
     };
   }
 
-  const dist = (a: number[], b: number[]) => Math.hypot(...a.map((v, k) => v - b[k]));
-  const same: number[] = [];
-  const different: number[] = [];
-  for (let i = 0; i < samples.length; i++) {
-    for (let j = i + 1; j < samples.length; j++) {
-      const d = dist(samples[i].features, samples[j].features);
-      (samples[i].pointIndex === samples[j].pointIndex ? same : different).push(d);
-    }
-  }
-  const featureSpread = [0, 1, 2, 3].map((k) => {
-    const col = samples.map((s) => s.features[k]);
-    return (Math.max(...col) - Math.min(...col)).toFixed(4);
-  });
-
-  console.groupCollapsed('[calibração][diagnóstico] clique para abrir');
-  console.table(table);
-  console.log(
-    `features — distância média entre as 2 amostras do MESMO alvo: ${avg(same).toFixed(4)} | ` +
-      `entre alvos DIFERENTES: ${avg(different).toFixed(4)} | razão: ${(avg(same) / avg(different)).toFixed(2)} ` +
-      `(perto de 1 = o olho não distingue os alvos)`,
-  );
-  console.log(`amplitude (máx − mín) de lx, ly, rx, ry: ${featureSpread.join(', ')}`);
-
-  // Sinais verticais candidatos: quanto cada um separa as 3 LINHAS da grade.
-  // separação = variância entre as médias das linhas / variância dentro das linhas.
-  // Maior = distingue melhor cima/meio/baixo. Valores perto de 0 = não serve.
-  const rowOf = (s: CalibrationSample) => Math.floor(s.pointIndex / 3);
-  const vertical: Record<string, (s: CalibrationSample) => number | undefined> = {
-    ly: (s) => s.features[1],
-    ry: (s) => s.features[3],
-    lidUpperL: (s) => s.extra?.lidUpperL,
-    lidUpperR: (s) => s.extra?.lidUpperR,
-    lidLowerL: (s) => s.extra?.lidLowerL,
-    lidLowerR: (s) => s.extra?.lidLowerR,
-    'lookDown−UpL': (s) => (s.extra ? s.extra.eyeLookDownLeft - s.extra.eyeLookUpLeft : undefined),
-    'lookDown−UpR': (s) => (s.extra ? s.extra.eyeLookDownRight - s.extra.eyeLookUpRight : undefined),
-  };
+  // separação = variância entre as médias das 3 linhas / variância dentro das linhas (maior = melhor).
+  const names = ['lx', 'ly', 'rx', 'ry', 'lidUpL', 'lidUpR', 'lookDUL', 'lookDUR'];
   const separation: Record<string, Record<string, string>> = {};
-  for (const [name, get] of Object.entries(vertical)) {
-    const byRow = [0, 1, 2].map((r) => samples.filter((s) => rowOf(s) === r).map(get).filter((v): v is number => v !== undefined));
+  for (const k of [1, 3, 4, 5, 6, 7]) {
+    const byRow = [0, 1, 2].map((r) => samples.filter((s) => Math.floor(s.pointIndex / 3) === r).map((s) => s.features[k]));
     if (byRow.some((r) => r.length < 2)) continue;
     const rowMeans = byRow.map(avg);
     const grand = avg(rowMeans);
     const between = avg(rowMeans.map((m) => (m - grand) ** 2));
     const within = avg(byRow.flatMap((r, i) => r.map((v) => (v - rowMeans[i]) ** 2)));
-    separation[name] = {
+    separation[names[k]] = {
       'média cima': rowMeans[0].toFixed(4),
       'média meio': rowMeans[1].toFixed(4),
       'média baixo': rowMeans[2].toFixed(4),
       separação: (between / Math.max(within, 1e-12)).toFixed(2),
     };
   }
-  console.log('SINAL VERTICAL — quanto cada candidato separa as linhas (maior = melhor):');
-  console.table(separation);
 
-  // JSON compacto (4 casas, uma linha por amostra) para caber numa mensagem.
-  const r4 = (v: number | undefined) => (v === undefined ? null : Math.round(v * 1e4) / 1e4);
-  const extraKeys = ['lidUpperL', 'lidLowerL', 'lidUpperR', 'lidLowerR', 'eyeLookUpLeft', 'eyeLookUpRight', 'eyeLookDownLeft', 'eyeLookDownRight', 'eyeLookInLeft', 'eyeLookInRight', 'eyeLookOutLeft', 'eyeLookOutRight'];
+  const r4 = (v: number) => Math.round(v * 1e4) / 1e4;
   const compact = {
     screen: [screenW, screenH],
-    cols: ['ponto', 'lx', 'ly', 'rx', 'ry', 'yaw', 'pitch', 'roll', ...extraKeys],
-    rows: samples.map((s) => [
-      s.pointIndex,
-      ...s.features.map(r4),
-      r4(s.headPose.yaw), r4(s.headPose.pitch), r4(s.headPose.roll),
-      ...extraKeys.map((k) => r4(s.extra?.[k])),
-    ]),
+    cols: ['ponto', ...names, 'yaw', 'pitch', 'roll'],
+    rows: samples.map((s) => [s.pointIndex, ...s.features.map(r4), r4(s.headPose.yaw), r4(s.headPose.pitch), r4(s.headPose.roll)]),
   };
+
+  console.groupCollapsed('[calibração][diagnóstico] clique para abrir');
+  console.table(table);
+  console.log('SINAL VERTICAL — quanto cada sinal separa as linhas (maior = melhor):');
+  console.table(separation);
   console.log('COPIE A LINHA ABAIXO E ENVIE:');
   console.log(JSON.stringify(compact));
   console.groupEnd();

@@ -82,23 +82,28 @@ export class GazeEstimator {
   }
 }
 
+/** Nomes, na ordem, das features oculares base devolvidas por extractGazeFeatures. */
+export const GAZE_FEATURE_NAMES = ['lx', 'ly', 'rx', 'ry', 'lidUpL', 'lidUpR', 'lookDUL', 'lookDUR'] as const;
+
 /**
- * Features oculares cruas de um frame, para a regressão da calibração:
- *   [lx, ly, rx, ry]   (l = olho esquerdo DA PESSOA, r = direito)
+ * Features oculares cruas de um frame, para a regressão da calibração (8 valores):
+ *   [lx, ly, rx, ry, lidUpL, lidUpR, lookDUL, lookDUR]   (L = olho esquerdo DA PESSOA)
  *
- * Diferente do gazeRaw (que usa a abertura entre as pálpebras), aqui as duas
- * componentes são medidas contra os CANTOS do olho, que não se movem com o olhar
- * nem com a pálpebra:
+ * Íris (lx, ly, rx, ry) — medida contra os CANTOS do olho, que não se movem com o
+ * olhar nem com a pálpebra:
  *   eixo u = canto imagem-esquerda → canto imagem-direita (unitário)
  *   eixo v = perpendicular a u, apontando para baixo na imagem
  *   x = (íris − ponto médio dos cantos) · u / largura do olho
  *   y = (íris − ponto médio dos cantos) · v / largura do olho
- * Dividir pela largura do próprio olho remove a distância até a câmera; medir a
- * partir dos cantos remove a posição do rosto na imagem; projetar nos eixos do
- * olho remove a inclinação da cabeça. Sem espelhamento de sinal: a regressão
- * aprende a orientação.
+ * Pálpebra superior (lidUpL, lidUpR) — mesmo sistema: (pálpebra − meio dos cantos) · v
+ *   / largura. A pálpebra acompanha o olhar vertical e compensa o sinal fraco da íris em Y.
+ * lookDown − lookUp (lookDUL, lookDUR) — blendshapes eyeLookDown* − eyeLookUp* do
+ *   próprio Face Landmarker, outro indicador vertical da região dos olhos.
  *
- * O bias é montado depois (calibrationStore.expandFeatures).
+ * Tudo vem da região ocular: nada de pose da cabeça nem posição do rosto na imagem.
+ * Dividir pela largura do olho remove a distância até a câmera; projetar nos eixos do
+ * olho remove a inclinação da cabeça. Qual feature entra em cada eixo é decidido em
+ * calibrationStore (X usa só a íris; Y usa íris + pálpebra + eyeLook).
  *
  * Retorna null se qualquer olho estiver fechado: eyeBlink > closedThreshold
  * (o doubleBlinkThreshold, mesmo critério do gazeRaw). Um olho semicerrado, como ao
@@ -110,36 +115,22 @@ export function extractGazeFeatures(
   imageHeight: number,
   eyeState: FaceFrame['eyeState'],
   closedThreshold: number,
+  blendshapes: Record<string, number>,
 ): number[] | null {
   if (1 - eyeState.leftOpen > closedThreshold || 1 - eyeState.rightOpen > closedThreshold) return null;
   const toPx = (i: number): Point => ({ x: landmarks[i].x * imageWidth, y: landmarks[i].y * imageHeight });
   const left = irisOffsetFromCorners(LEFT_EYE, toPx);
   const right = irisOffsetFromCorners(RIGHT_EYE, toPx);
-  if (!left || !right) return null;
-  return [left.x, left.y, right.x, right.y];
-}
-
-/**
- * DIAGNÓSTICO TEMPORÁRIO: posição das pálpebras, candidata a sinal vertical extra.
- *   [lSuperior, lInferior, rSuperior, rInferior]
- * Cada valor = (pálpebra − ponto médio dos cantos) · v / largura do olho, no mesmo
- * sistema de eixos das features da íris (v aponta para baixo). A pálpebra superior
- * acompanha o olhar vertical, então pode separar as linhas da grade melhor que a íris.
- */
-export function extractEyelidFeatures(
-  landmarks: ReadonlyArray<Point>,
-  imageWidth: number,
-  imageHeight: number,
-): number[] | null {
-  const toPx = (i: number): Point => ({ x: landmarks[i].x * imageWidth, y: landmarks[i].y * imageHeight });
-  const out: number[] = [];
-  for (const eye of [LEFT_EYE, RIGHT_EYE]) {
-    const upper = offsetAlongV(eye, toPx(eye.upperLid), toPx);
-    const lower = offsetAlongV(eye, toPx(eye.lowerLid), toPx);
-    if (upper === null || lower === null) return null;
-    out.push(upper, lower);
-  }
-  return out;
+  const lidL = offsetAlongV(LEFT_EYE, toPx(LEFT_EYE.upperLid), toPx);
+  const lidR = offsetAlongV(RIGHT_EYE, toPx(RIGHT_EYE.upperLid), toPx);
+  if (!left || !right || lidL === null || lidR === null) return null;
+  const b = (name: string) => blendshapes[name] ?? 0;
+  return [
+    left.x, left.y, right.x, right.y,
+    lidL, lidR,
+    b('eyeLookDownLeft') - b('eyeLookUpLeft'),
+    b('eyeLookDownRight') - b('eyeLookUpRight'),
+  ];
 }
 
 function offsetAlongV(eye: EyeIndices, p: Point, toPx: (i: number) => Point): number | null {

@@ -12,10 +12,8 @@ export interface FaceFrame {
     winkRight: boolean;
   };
   faceDetected: boolean;
-  /** Features oculares base [lx, ly, rx, ry] (ver extractGazeFeatures). null sem rosto ou com olho fechado. */
+  /** Features oculares base, 8 valores (ver extractGazeFeatures / GAZE_FEATURE_NAMES). null sem rosto ou com olho fechado. */
   gazeFeatures: number[] | null;
-  /** DIAGNÓSTICO TEMPORÁRIO: pálpebras [lSup, lInf, rSup, rInf] (ver extractEyelidFeatures). */
-  eyelidFeatures: number[] | null;
 }
 
 export interface DebugConfig {

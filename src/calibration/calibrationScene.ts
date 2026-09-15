@@ -1,5 +1,6 @@
 import type { AimState, AimTarget } from '../game/aiming';
 import type { FrameBuffer } from '../tracking/frameBuffer';
+import { GAZE_FEATURE_NAMES } from '../tracking/gazeEstimator';
 import type { DebugConfig, FaceFrame } from '../types';
 import { median, type CalibrationSample, type CalibrationStore } from './calibrationStore';
 
@@ -10,14 +11,13 @@ const WINDOW_END_MS = 150;        // …a 150 ms antes do início do fechamento
 const MIN_WINDOW_FRAMES = 4;      // menos que isso, mediana e desvio não significam nada
 const MAX_HEAD_RANGE_DEG = 5;     // variação máxima da cabeça dentro da janela, por eixo
 const MAX_HEAD_FROM_OTHERS_DEG = 5; // distância máxima da pose até a mediana das amostras já aceitas
-/** Desvio padrão máximo de cada feature na janela, em larguras de olho (unidade crua das features). */
-const FEATURE_STD_LIMIT = 0.02;
-const FEATURE_NAMES = ['lx', 'ly', 'rx', 'ry'];
-/** DIAGNÓSTICO TEMPORÁRIO: blendshapes de direção do olhar registrados junto com cada amostra. */
-const EYE_LOOK_BLENDSHAPES = [
-  'eyeLookUpLeft', 'eyeLookUpRight', 'eyeLookDownLeft', 'eyeLookDownRight',
-  'eyeLookInLeft', 'eyeLookInRight', 'eyeLookOutLeft', 'eyeLookOutRight',
-];
+/**
+ * Desvio padrão máximo de cada feature na janela (ordem de GAZE_FEATURE_NAMES).
+ * Íris e pálpebra em larguras de olho; lookDown−Up em unidades de blendshape (0–1),
+ * que oscilam mais de frame a frame, por isso o limite maior (estimado, ajustar se
+ * aparecer muito "Olhar instável" em lookDU*).
+ */
+const FEATURE_STD_LIMITS = [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.06, 0.06];
 
 // ---------- Apresentação ----------
 const PASSES = 2;
@@ -280,11 +280,11 @@ export class CalibrationScene {
       }
     }
 
-    const features = FEATURE_NAMES.map((_, k) => win.map((f) => f.gazeFeatures![k]));
+    const features = GAZE_FEATURE_NAMES.map((_, k) => win.map((f) => f.gazeFeatures![k]));
     for (let k = 0; k < features.length; k++) {
       const sd = stdDev(features[k]);
-      if (sd > FEATURE_STD_LIMIT) {
-        return `Olhar instável: σ(${FEATURE_NAMES[k]}) = ${sd.toFixed(3)} > ${FEATURE_STD_LIMIT}`;
+      if (sd > FEATURE_STD_LIMITS[k]) {
+        return `Olhar instável: σ(${GAZE_FEATURE_NAMES[k]}) = ${sd.toFixed(3)} > ${FEATURE_STD_LIMITS[k]}`;
       }
     }
 
@@ -306,23 +306,12 @@ export class CalibrationScene {
       }
     }
 
-    // DIAGNÓSTICO TEMPORÁRIO: candidatos a sinal vertical, só registrados (não entram no modelo).
-    const extra: Record<string, number> = {};
-    const lidNames = ['lidUpperL', 'lidLowerL', 'lidUpperR', 'lidLowerR'];
-    if (win.every((f) => f.eyelidFeatures)) {
-      lidNames.forEach((name, k) => (extra[name] = median(win.map((f) => f.eyelidFeatures![k]))));
-    }
-    for (const name of EYE_LOOK_BLENDSHAPES) {
-      extra[name] = median(win.map((f) => f.blendshapes[name] ?? 0));
-    }
-
     const target = gridTarget(this.currentPoint, screenW, screenH);
     return {
       features: features.map(median),
       headPose,
       target: { x: target.x, y: target.y },
       pointIndex: this.currentPoint,
-      extra,
     };
   }
 
