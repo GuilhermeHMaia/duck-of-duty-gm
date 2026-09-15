@@ -139,6 +139,8 @@ export class CalibrationStore {
       screenSize: { w: screenW, h: screenH },
     };
 
+    logCalibrationDiagnostics(samples, lambda, screenW, screenH); // TEMPORÁRIO
+
     this.model = model;
     this.status = 'trained';
     this.invalidatedReason = null;
@@ -171,8 +173,8 @@ interface Weights {
  * Sem padronizar, os termos quadráticos (valores ~0,001) e os lineares (~0,05)
  * ficariam em escalas diferentes e o mesmo λ penalizaria cada um de forma desigual.
  */
-function trainWeights(samples: CalibrationSample[], lambda: number): Weights {
-  const rows = samples.map((s) => expandFeatures(s.features));
+function trainWeights(samples: CalibrationSample[], lambda: number, expand = expandFeatures): Weights {
+  const rows = samples.map((s) => expand(s.features));
   const p = rows[0].length;
   const mean = new Array(p).fill(0);
   const std = new Array(p).fill(1);
@@ -191,11 +193,70 @@ function trainWeights(samples: CalibrationSample[], lambda: number): Weights {
   };
 }
 
-function applyWeights(w: Weights, base: number[]): { x: number; y: number } {
-  const f = standardize(expandFeatures(base), w.mean, w.std);
+function applyWeights(w: Weights, base: number[], expand = expandFeatures): { x: number; y: number } {
+  const f = standardize(expand(base), w.mean, w.std);
   return { x: predict(w.weightsX, f), y: predict(w.weightsY, f) };
 }
 
 function standardize(row: number[], mean: number[], std: number[]): number[] {
   return row.map((v, j) => (j === 0 ? 1 : (v - mean[j]) / std[j]));
+}
+
+// ---------- DIAGNÓSTICO TEMPORÁRIO (remover depois de investigar o erro alto) ----------
+
+/**
+ * Imprime no Console, a cada treino:
+ *  1. erro dentro do treino × leave-one-out, para o modelo de 11 termos e para um só linear;
+ *  2. erro separado em X e em Y;
+ *  3. consistência das features: distância entre as 2 amostras do MESMO alvo × entre alvos diferentes;
+ *  4. JSON com as amostras, para copiar e analisar fora do navegador.
+ */
+function logCalibrationDiagnostics(samples: CalibrationSample[], lambda: number, screenW: number, screenH: number): void {
+  const linear = (b: number[]) => [1, b[0], b[1], b[2], b[3]];
+  const models = { 'quadrático (11)': expandFeatures, 'linear (5)': linear };
+  const avg = (v: number[]) => v.reduce((a, b) => a + b, 0) / Math.max(v.length, 1);
+
+  const table: Record<string, Record<string, string>> = {};
+  for (const [name, expand] of Object.entries(models)) {
+    const all = trainWeights(samples, lambda, expand);
+    const inSample = samples.map((s) => applyWeights(all, s.features, expand));
+    const looPred = samples.map((s) => {
+      const w = trainWeights(samples.filter((o) => o.pointIndex !== s.pointIndex), lambda, expand);
+      return applyWeights(w, s.features, expand);
+    });
+    const err = (preds: { x: number; y: number }[], f: (p: { x: number; y: number }, s: CalibrationSample) => number) =>
+      avg(preds.map((p, i) => f(p, samples[i]))).toFixed(0);
+    table[name] = {
+      'treino px': err(inSample, (p, s) => Math.hypot(p.x - s.target.x, p.y - s.target.y)),
+      'LOO px': err(looPred, (p, s) => Math.hypot(p.x - s.target.x, p.y - s.target.y)),
+      'LOO |X| px': err(looPred, (p, s) => Math.abs(p.x - s.target.x)),
+      'LOO |Y| px': err(looPred, (p, s) => Math.abs(p.y - s.target.y)),
+    };
+  }
+
+  const dist = (a: number[], b: number[]) => Math.hypot(...a.map((v, k) => v - b[k]));
+  const same: number[] = [];
+  const different: number[] = [];
+  for (let i = 0; i < samples.length; i++) {
+    for (let j = i + 1; j < samples.length; j++) {
+      const d = dist(samples[i].features, samples[j].features);
+      (samples[i].pointIndex === samples[j].pointIndex ? same : different).push(d);
+    }
+  }
+  const featureSpread = [0, 1, 2, 3].map((k) => {
+    const col = samples.map((s) => s.features[k]);
+    return (Math.max(...col) - Math.min(...col)).toFixed(4);
+  });
+
+  console.groupCollapsed('[calibração][diagnóstico] clique para abrir');
+  console.table(table);
+  console.log(
+    `features — distância média entre as 2 amostras do MESMO alvo: ${avg(same).toFixed(4)} | ` +
+      `entre alvos DIFERENTES: ${avg(different).toFixed(4)} | razão: ${(avg(same) / avg(different)).toFixed(2)} ` +
+      `(perto de 1 = o olho não distingue os alvos)`,
+  );
+  console.log(`amplitude (máx − mín) de lx, ly, rx, ry: ${featureSpread.join(', ')}`);
+  console.log('COPIE A LINHA ABAIXO E ENVIE:');
+  console.log(JSON.stringify({ screenW, screenH, lambda, samples }));
+  console.groupEnd();
 }
