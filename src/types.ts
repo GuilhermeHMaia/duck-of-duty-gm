@@ -23,7 +23,6 @@ export interface FaceFrame {
 
 export interface DebugConfig {
   winkThreshold: number;         // 0.5  — limiar da DIFERENÇA entre os olhos (|eyeBlinkLeft − eyeBlinkRight|) para wink
-  winkCounterThreshold: number;  // 0.25 — sem uso desde que o wink passou a ser por diferença
   winkMinFrames: number;         // 2
   doubleBlinkThreshold: number;  // 0.8  — eyeBlink acima disso = olho fechado sempre (teto absoluto)
   blinkRise: number;             // 0.35 — subida acima do repouso que conta como olho fechado

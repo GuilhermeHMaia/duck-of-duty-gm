@@ -35,6 +35,8 @@ const NEXT_TARGET_GAP_MS = 300;
 const POP_MS = 200;
 const BAD_POINT_PX = 150;
 const GRID_MARGIN = 0.1;
+/** Por quanto tempo a dica de uma amostra descartada fica na tela. */
+const DISCARD_HINT_MS = 2500;
 
 type Phase = 'intro' | 'target' | 'falling' | 'results' | 'free';
 
@@ -50,6 +52,11 @@ export interface CalibrationSceneHooks {
   startGame(): void;
   /** Recentralizar a mira no ponto (x, y) que o jogador está olhando. Devolve se deu certo. */
   recenter(x: number, y: number): boolean;
+  /**
+   * Piscada rápida na tela de resultado. Devolve true se quem chamou assumiu a navegação
+   * (primeira vez guiada segue para o tutorial); false mantém o padrão, a mira livre.
+   */
+  afterResults(): boolean;
 }
 
 /**
@@ -147,7 +154,7 @@ export class CalibrationScene {
     // Olhos reabriram.
     if (this.closedSince !== null) {
       const held = t - this.closedSince;
-      if (!this.closureHandled && this.phase === 'results' && held >= BLINK_TRIGGER_MS) this.phase = 'free';
+      if (!this.closureHandled && this.phase === 'results' && held >= BLINK_TRIGGER_MS && !this.hooks.afterResults()) this.phase = 'free';
       this.closedSince = null;
       this.closureHandled = false;
     }
@@ -203,7 +210,9 @@ export class CalibrationScene {
       case 'intro':
         drawText(ctx, screenW / 2, screenH / 2 - 30, 'Estande de Treino', 44, '#f8fafc');
         drawText(ctx, screenW / 2, screenH / 2 + 20, 'acerte os alvos para calibrar sua mira', 22, '#cbd5e1');
-        drawText(ctx, screenW / 2, screenH / 2 + 70, 'Melhor de duas rodadas · feche os dois olhos por um instante para começar', 18, '#94a3b8');
+        drawText(ctx, screenW / 2, screenH / 2 + 70, 'Olhe o centro de cada alvo mexendo SÓ OS OLHOS, com a cabeça parada,', 18, '#e2e8f0');
+        drawText(ctx, screenW / 2, screenH / 2 + 98, 'e feche os dois olhos por um instante para derrubá-lo. São 18 alvos.', 18, '#e2e8f0');
+        drawText(ctx, screenW / 2, screenH / 2 + 148, 'Feche os dois olhos por um instante para começar', 18, '#94a3b8');
         break;
 
       case 'target': {
@@ -211,6 +220,9 @@ export class CalibrationScene {
         const pop = Math.min(1, (now - this.appearedAt) / POP_MS);
         drawTarget(ctx, t.x, t.y, TARGET_RADIUS * (0.6 + 0.4 * easeOut(pop)), 1, false);
         this.drawHud(ctx, screenW);
+        if (this.lastDiscard && now - this.lastDiscard.at < DISCARD_HINT_MS) {
+          drawText(ctx, screenW / 2, 72, friendlyDiscardHint(this.lastDiscard.reason), 20, '#fde68a');
+        }
         break;
       }
 
@@ -411,6 +423,15 @@ export class CalibrationScene {
 }
 
 // ---------- Utilitários ----------
+
+/** Traduz o motivo técnico de um descarte numa dica curta para quem está jogando. */
+export function friendlyDiscardHint(reason: string): string {
+  if (reason.startsWith('Cabeça')) return 'Mantenha a cabeça parada e mexa só os olhos';
+  if (reason.startsWith('Piscada cedo')) return 'Olhe o alvo por meio segundo antes de fechar os olhos';
+  if (reason.startsWith('Olhar instável')) return 'Segure o olhar firme no centro do alvo';
+  if (reason.startsWith('Poucos frames')) return 'Câmera lenta: melhore a iluminação do rosto';
+  return 'Mantenha o rosto visível e os olhos abertos antes de fechar';
+}
 
 /** Alvo i (0–8) da grade 3×3, com margem de 10% das bordas. */
 function gridTarget(i: number, screenW: number, screenH: number): AimTarget {

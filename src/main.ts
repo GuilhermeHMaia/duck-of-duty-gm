@@ -15,38 +15,17 @@ import { BriefingScene } from './scenes/briefingScene';
 import { MapScene } from './scenes/mapScene';
 import { MenuScene, type ButtonScene, type Nav } from './scenes/menuScene';
 import { ResultScene } from './scenes/resultScene';
+import { SettingsScene } from './scenes/settingsScene';
+import { SetupScene } from './scenes/setupScene';
+import { WelcomeScene } from './scenes/welcomeScene';
+import { DEFAULT_CONFIG, restoreDefaultConfig, saveConfig } from './settings/configStore';
+import { isOnboardingDone, markOnboardingDone } from './settings/onboarding';
 import { FaceTracker } from './tracking/faceTracker';
 import { FrameBuffer } from './tracking/frameBuffer';
 import type { DebugConfig, FaceFrame } from './types';
 
-// Criado uma única vez e compartilhado por referência. O painel muta este objeto;
-// os módulos leem os campos a cada frame.
-const DEFAULT_CONFIG: Readonly<DebugConfig> = {
-  winkThreshold: 0.5,
-  winkCounterThreshold: 0.25,
-  winkMinFrames: 2,
-  doubleBlinkThreshold: 0.8,
-  blinkRise: 0.35,
-  minCutoff: 1.0,
-  beta: 0.007,
-  dCutoff: 1.0,
-  preBlinkBufferMs: 180,
-  snapRadius: 110,
-  snapHysteresis: 60,
-  headGain: 45,
-  headDeadzone: 0,
-  eyeMaxOffset: 1200,
-  ridgeLambda: 1,
-  eyeMinCutoff: 0.5,
-  eyeBeta: 0.005,
-  headMinCutoff: 1.5,
-  headBeta: 0.02,
-  duckSpeed: 130,
-  duckEscapeMs: 9000,
-  focusFillPerSec: 1.25,
-  focusDecayPerSec: 0.3,
-  focusToShoot: 0.6,
-};
+// Criado uma única vez e compartilhado por referência. O painel e as Configurações mutam este
+// objeto; os módulos leem os campos a cada frame.
 // O painel aplica por cima os valores salvos pelo jogador (localStorage) antes de qualquer módulo ler.
 const config: DebugConfig = { ...DEFAULT_CONFIG };
 
@@ -89,16 +68,27 @@ career.load();
 
 // ---------- Cenas e navegação ----------
 
-type SceneId = 'calibration' | 'menu' | 'map' | 'briefing' | 'arsenal' | 'achievements' | 'result' | 'game';
-/** Cena ativa: calibração (Estande / mira livre), telas de menu ou a partida. */
-let activeScene: SceneId = 'calibration';
+type SceneId =
+  | 'welcome'
+  | 'setup'
+  | 'calibration'
+  | 'menu'
+  | 'map'
+  | 'briefing'
+  | 'arsenal'
+  | 'achievements'
+  | 'settings'
+  | 'result'
+  | 'game';
+/** Cena ativa: boas-vindas/carregamento, preparo, calibração (Estande / mira livre), telas de menu ou a partida. */
+let activeScene: SceneId = 'welcome';
 
 const game = new DuckGame(config, (stats, setup) => onGameFinished(stats, setup));
 
 const panel = new DebugPanel(config, video, {
   onRecalibrate: () => nav.recalibrate(),
   onClearCalibration: () => store.clear(),
-}, DEFAULT_CONFIG);
+});
 
 const nav: Nav = {
   menu: () => goto('menu'),
@@ -138,6 +128,7 @@ const nav: Nav = {
     goto('game');
   },
   achievements: () => goto('achievements'),
+  settings: () => goto('settings'),
   freeAim: () => {
     scene.showFreeAim();
     goto('calibration');
@@ -150,17 +141,48 @@ const nav: Nav = {
 };
 
 const scene = new CalibrationScene(store, buffer, {
-  setPanelCollapsed: (collapsed) => panel.setCollapsed(collapsed),
+  // Na primeira vez guiada o painel técnico não abre sozinho no resultado do Estande.
+  setPanelCollapsed: (collapsed) => {
+    if (collapsed || isOnboardingDone()) panel.setCollapsed(collapsed);
+  },
   startGame: () => nav.menu(),
   recenter: (x, y) => aiming.recenter(x, y),
+  afterResults: () => {
+    if (isOnboardingDone() || !store.model) return false;
+    // Primeira vez guiada: do Estande direto para a missão tutorial do Lago.
+    markOnboardingDone();
+    nav.briefing('lago-1');
+    return true;
+  },
 });
-const menuScene = new MenuScene(config, career, nav);
+const welcomeScene = new WelcomeScene(config, () => void boot());
+const setupScene = new SetupScene(
+  config,
+  { video, landmarks: () => tracker.getLandmarks(), trackingFps: () => trackingFps.value(performance.now()) },
+  () => nav.recalibrate(),
+);
+const settingsScene = new SettingsScene(config, nav, {
+  onChanged: () => {
+    saveConfig(config);
+    panel.refreshSliders();
+  },
+  onRestoreDefaults: () => {
+    restoreDefaultConfig(config);
+    panel.refreshSliders();
+  },
+});
+const menuScene = new MenuScene(config, career, nav, () =>
+  store.invalidatedReason ? 'A janela mudou de tamanho e a calibração foi apagada: use Recalibrar' : null,
+);
 const mapScene = new MapScene(config, career, nav);
 const briefingScene = new BriefingScene(config, career, nav);
 const arsenalScene = new ArsenalScene(config, career);
 const resultScene = new ResultScene(config, nav);
 const achievementsScene = new AchievementsScene(config, career, nav);
 const buttonScenes: Partial<Record<SceneId, ButtonScene>> = {
+  welcome: welcomeScene,
+  setup: setupScene,
+  settings: settingsScene,
   menu: menuScene,
   map: mapScene,
   briefing: briefingScene,
@@ -452,23 +474,58 @@ function scheduleFpsCheck(index: number): void {
   }, FPS_CHECK_DELAY_MS);
 }
 
-async function start(): Promise<void> {
-  requestAnimationFrame(render);
-  try {
-    statusEl.textContent = 'Pedindo acesso à webcam…';
-    await useCamera(0);
+let trackerReady = false;
+let booting = false;
 
-    statusEl.textContent = 'Carregando Face Landmarker…';
-    await tracker.init();
+/** Abre a câmera e carrega o detector; em caso de erro a tela de boas-vindas mostra o que fazer. */
+async function boot(): Promise<void> {
+  if (booting) return;
+  booting = true;
+  goto('welcome');
+  try {
+    if (!video.srcObject) {
+      welcomeScene.showLoading('Pedindo acesso à câmera');
+      await useCamera(0);
+    }
+    if (!trackerReady) {
+      welcomeScene.showLoading('Carregando o detector de rosto');
+      await tracker.init();
+      trackerReady = true;
+    }
 
     statusEl.textContent = store.invalidatedReason ?? '';
-    if (store.model) nav.menu();
-    else scene.start();
+    if (store.model) {
+      nav.menu();
+    } else if (!isOnboardingDone()) {
+      goto('setup');
+    } else {
+      goto('calibration');
+      scene.start();
+    }
     scheduleNextFrame();
     scheduleFpsCheck(0);
   } catch (err) {
     console.error(err);
-    statusEl.textContent = `Erro: ${err instanceof Error ? err.message : String(err)}`;
+    // Câmera que abriu mas falhou depois: fecha para a próxima tentativa abrir de novo.
+    if (!trackerReady) {
+      (video.srcObject as MediaStream | null)?.getTracks().forEach((track) => track.stop());
+      video.srcObject = null;
+    }
+    welcomeScene.showError(err);
+  } finally {
+    booting = false;
+  }
+}
+
+function start(): void {
+  requestAnimationFrame(render);
+  // Quem já calibrou ou tem progresso não passa pela primeira vez guiada.
+  if (!isOnboardingDone() && (store.model || store.invalidatedReason || career.totalStars() > 0)) markOnboardingDone();
+  if (isOnboardingDone()) {
+    void boot();
+  } else {
+    welcomeScene.showIntro();
+    goto('welcome');
   }
 }
 

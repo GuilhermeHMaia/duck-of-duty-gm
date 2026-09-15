@@ -15,6 +15,7 @@ export interface Nav {
   startArcade(): void;
   startDaily(): void;
   achievements(): void;
+  settings(): void;
   freeAim(): void;
   recalibrate(): void;
 }
@@ -119,7 +120,13 @@ export abstract class ButtonScene {
     drawMenuBackground(ctx, w, h);
     this.drawContent(ctx, now, w, h);
     for (const b of this.layout(w, h)) drawButton(ctx, b, b.id === this.hoveredId && b.enabled !== false);
-    drawText(ctx, w / 2, h - 18, 'Olhe um botão e feche os olhos por um instante para escolher · ou clique', 13, '#64748b');
+    const footer = this.footerHint();
+    if (footer) drawText(ctx, w / 2, h - 18, footer, 13, '#64748b');
+  }
+
+  /** Texto de rodapé; null esconde. */
+  protected footerHint(): string | null {
+    return 'Olhe um botão e feche os olhos por um instante para escolher · ou clique';
   }
 }
 
@@ -136,6 +143,8 @@ export class MenuScene extends ButtonScene {
     config: DebugConfig,
     private readonly career: CareerStore,
     private readonly nav: Nav,
+    /** Aviso de calibração perdida (ex.: janela mudou de tamanho); null quando está tudo bem. */
+    private readonly calibrationWarning: () => string | null,
   ) {
     super(config);
   }
@@ -149,6 +158,7 @@ export class MenuScene extends ButtonScene {
       { id: 'arcade', label: 'Treino Livre', sub: '5 rodadas · recorde', onSelect: () => this.nav.startArcade() },
       { id: 'arsenal', label: 'Arsenal', sub: 'Armas e melhorias', onSelect: () => this.nav.arsenal(() => this.nav.menu()) },
       { id: 'achievements', label: 'Conquistas', sub: `${this.career.state.achievements.length} desbloqueadas`, onSelect: () => this.nav.achievements() },
+      { id: 'settings', label: 'Configurações', sub: 'Sensibilidade, piscar, som', onSelect: () => this.nav.settings() },
       { id: 'free', label: 'Mira livre', sub: 'Testar e recentralizar a mira', onSelect: () => this.nav.freeAim() },
       { id: 'recalibrate', label: 'Recalibrar', sub: 'Refazer o Estande de Treino', onSelect: () => this.nav.recalibrate() },
     ];
@@ -159,6 +169,8 @@ export class MenuScene extends ButtonScene {
     drawText(ctx, w / 2, h * 0.12, 'DUCK OF DUTY', 52, '#f8fafc');
     drawText(ctx, w / 2, h * 0.12 + 44, 'Divisão Olho de Águia', 20, '#94a3b8');
     drawText(ctx, w / 2, h * 0.12 + 80, `★ ${this.career.totalStars()}   ·   ${this.career.state.penas} penas`, 18, '#facc15');
+    const warning = this.calibrationWarning();
+    if (warning) drawText(ctx, w / 2, h * 0.12 + 108, warning, fitSize(ctx, warning, w - 48, 16), '#fca5a5');
     if (!sfx.ready) drawText(ctx, w / 2, h - 40, 'Clique em qualquer lugar ou aperte uma tecla para ativar o som · M silencia', 13, '#94a3b8');
   }
 }

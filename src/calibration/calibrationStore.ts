@@ -157,8 +157,6 @@ export class CalibrationStore {
       aimBias: { x: 0, y: 0 },
     };
 
-    logCalibrationDiagnostics(samples, lambda, screenW, screenH); // TEMPORÁRIO
-
     this.model = model;
     this.status = 'trained';
     this.invalidatedReason = null;
@@ -242,71 +240,4 @@ function applyWeights(w: Weights, base: number[]): { x: number; y: number } {
 
 function standardize(row: number[], mean: number[], std: number[]): number[] {
   return row.map((v, j) => (j === 0 ? 1 : (v - mean[j]) / std[j]));
-}
-
-// ---------- DIAGNÓSTICO TEMPORÁRIO (remover depois de investigar o erro alto) ----------
-
-/**
- * Imprime no Console, a cada treino:
- *  1. erro dentro do treino × leave-one-out, modelo atual × anterior;
- *  2. erro separado em X e em Y;
- *  3. quanto cada sinal vertical separa as linhas da grade;
- *  4. JSON compacto com as amostras, para copiar e analisar fora do navegador.
- */
-function logCalibrationDiagnostics(samples: CalibrationSample[], lambda: number, screenW: number, screenH: number): void {
-  const avg = (v: number[]) => v.reduce((a, b) => a + b, 0) / Math.max(v.length, 1);
-  const iris4: Expand = (b) => [1, b[0], b[1], b[2], b[3]];
-  const models: Record<string, [Expand, Expand]> = {
-    'atual: média dos olhos, por eixo': [expandX, expandY],
-    'anterior: cada olho separado, por eixo': [(b) => [1, b[0], b[2]], (b) => [1, b[1], b[3], b[4], b[5], b[6], b[7]]],
-    'íris (4) nos dois eixos': [iris4, iris4],
-  };
-
-  const table: Record<string, Record<string, string>> = {};
-  for (const [name, [ex, ey]] of Object.entries(models)) {
-    const all = trainWeights(samples, lambda, ex, ey);
-    const inSample = samples.map((s) => applyWeights(all, s.features));
-    const looPred = samples.map((s) => applyWeights(trainWeights(samples.filter((o) => o.pointIndex !== s.pointIndex), lambda, ex, ey), s.features));
-    const err = (preds: { x: number; y: number }[], f: (p: { x: number; y: number }, s: CalibrationSample) => number) =>
-      avg(preds.map((p, i) => f(p, samples[i]))).toFixed(0);
-    table[name] = {
-      'treino px': err(inSample, (p, s) => Math.hypot(p.x - s.target.x, p.y - s.target.y)),
-      'LOO px': err(looPred, (p, s) => Math.hypot(p.x - s.target.x, p.y - s.target.y)),
-      'LOO |X| px': err(looPred, (p, s) => Math.abs(p.x - s.target.x)),
-      'LOO |Y| px': err(looPred, (p, s) => Math.abs(p.y - s.target.y)),
-    };
-  }
-
-  // separação = variância entre as médias das 3 linhas / variância dentro das linhas (maior = melhor).
-  const names = ['lx', 'ly', 'rx', 'ry', 'lidUpL', 'lidUpR', 'lookDUL', 'lookDUR'];
-  const separation: Record<string, Record<string, string>> = {};
-  for (const k of [1, 3, 4, 5, 6, 7]) {
-    const byRow = [0, 1, 2].map((r) => samples.filter((s) => Math.floor(s.pointIndex / 3) === r).map((s) => s.features[k]));
-    if (byRow.some((r) => r.length < 2)) continue;
-    const rowMeans = byRow.map(avg);
-    const grand = avg(rowMeans);
-    const between = avg(rowMeans.map((m) => (m - grand) ** 2));
-    const within = avg(byRow.flatMap((r, i) => r.map((v) => (v - rowMeans[i]) ** 2)));
-    separation[names[k]] = {
-      'média cima': rowMeans[0].toFixed(4),
-      'média meio': rowMeans[1].toFixed(4),
-      'média baixo': rowMeans[2].toFixed(4),
-      separação: (between / Math.max(within, 1e-12)).toFixed(2),
-    };
-  }
-
-  const r4 = (v: number) => Math.round(v * 1e4) / 1e4;
-  const compact = {
-    screen: [screenW, screenH],
-    cols: ['ponto', ...names, 'yaw', 'pitch', 'roll'],
-    rows: samples.map((s) => [s.pointIndex, ...s.features.map(r4), r4(s.headPose.yaw), r4(s.headPose.pitch), r4(s.headPose.roll)]),
-  };
-
-  console.groupCollapsed('[calibração][diagnóstico] clique para abrir');
-  console.table(table);
-  console.log('SINAL VERTICAL — quanto cada sinal separa as linhas (maior = melhor):');
-  console.table(separation);
-  console.log('COPIE A LINHA ABAIXO E ENVIE:');
-  console.log(JSON.stringify(compact));
-  console.groupEnd();
 }

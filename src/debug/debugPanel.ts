@@ -1,6 +1,7 @@
 import type { CalibrationModel, CalibrationStatus } from '../calibration/calibrationStore';
 import type { DiscardInfo } from '../calibration/calibrationScene';
 import type { AimState } from '../game/aiming';
+import { loadSavedConfig, restoreDefaultConfig, saveConfig } from '../settings/configStore';
 import type { DebugConfig, FaceFrame } from '../types';
 
 const CHART_WINDOW_MS = 5000;
@@ -24,7 +25,6 @@ const THRESHOLD_LINES: { key: keyof DebugConfig; color: string }[] = [
 /** log: o slider anda em log10(valor); min/max/step são então expoentes. */
 const SLIDERS: { key: keyof DebugConfig; min: number; max: number; step: number; log?: boolean }[] = [
   { key: 'winkThreshold', min: 0, max: 1, step: 0.01 },
-  { key: 'winkCounterThreshold', min: 0, max: 1, step: 0.01 },
   { key: 'winkMinFrames', min: 1, max: 10, step: 1 },
   { key: 'doubleBlinkThreshold', min: 0, max: 1, step: 0.01 },
   { key: 'blinkRise', min: 0.05, max: 1, step: 0.01 },
@@ -62,9 +62,6 @@ export interface DebugPanelActions {
   onClearCalibration(): void;
 }
 
-/** Onde os valores dos sliders ficam salvos entre recargas. */
-const CONFIG_STORAGE_KEY = 'duck-of-duty.config.v1';
-
 interface ChartSample {
   t: number;
   values: Record<SeriesKey, number>;
@@ -95,10 +92,9 @@ export class DebugPanel {
     private readonly config: DebugConfig,
     private readonly video: HTMLVideoElement,
     actions: DebugPanelActions,
-    private readonly defaults: Readonly<DebugConfig>,
   ) {
     // Valores salvos pelo jogador valem por cima dos padrões, antes de construir os sliders.
-    this.loadSavedConfig();
+    loadSavedConfig(config);
 
     this.root = el('div', 'debug-panel');
 
@@ -299,7 +295,7 @@ export class DebugPanel {
       // Muta o objeto compartilhado: os módulos leem o novo valor no próximo frame.
       this.config[def.key] = def.log ? 10 ** Number(input.value) : Number(input.value);
       value.textContent = format(this.config[def.key]);
-      this.saveConfig();
+      saveConfig(this.config);
     });
     this.sliderRefreshers.push(() => {
       input.value = String(def.log ? Math.log10(this.config[def.key]) : this.config[def.key]);
@@ -310,36 +306,13 @@ export class DebugPanel {
     return row;
   }
 
-  /** Aplica no config os valores salvos (só chaves conhecidas e numéricas; ignora campos antigos). */
-  private loadSavedConfig(): void {
-    try {
-      const raw = localStorage.getItem(CONFIG_STORAGE_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw) as Record<string, unknown>;
-      for (const key of Object.keys(this.defaults) as (keyof DebugConfig)[]) {
-        const v = saved[key];
-        if (typeof v === 'number' && Number.isFinite(v)) this.config[key] = v;
-      }
-    } catch (err) {
-      console.warn('[painel] não foi possível ler a configuração salva', err);
-    }
-  }
-
-  private saveConfig(): void {
-    try {
-      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(this.config));
-    } catch (err) {
-      console.warn('[painel] não foi possível salvar a configuração', err);
-    }
-  }
-
   private restoreDefaults(): void {
-    Object.assign(this.config, this.defaults);
-    try {
-      localStorage.removeItem(CONFIG_STORAGE_KEY);
-    } catch {
-      // sem localStorage: os padrões valem só nesta sessão
-    }
+    restoreDefaultConfig(this.config);
+    this.refreshSliders();
+  }
+
+  /** Atualiza os sliders para o config atual (depois de mudanças feitas fora do painel, como o menu Configurações). */
+  refreshSliders(): void {
     for (const refresh of this.sliderRefreshers) refresh();
   }
 
