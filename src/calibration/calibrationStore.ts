@@ -263,7 +263,53 @@ function logCalibrationDiagnostics(samples: CalibrationSample[], lambda: number,
       `(perto de 1 = o olho não distingue os alvos)`,
   );
   console.log(`amplitude (máx − mín) de lx, ly, rx, ry: ${featureSpread.join(', ')}`);
+
+  // Sinais verticais candidatos: quanto cada um separa as 3 LINHAS da grade.
+  // separação = variância entre as médias das linhas / variância dentro das linhas.
+  // Maior = distingue melhor cima/meio/baixo. Valores perto de 0 = não serve.
+  const rowOf = (s: CalibrationSample) => Math.floor(s.pointIndex / 3);
+  const vertical: Record<string, (s: CalibrationSample) => number | undefined> = {
+    ly: (s) => s.features[1],
+    ry: (s) => s.features[3],
+    lidUpperL: (s) => s.extra?.lidUpperL,
+    lidUpperR: (s) => s.extra?.lidUpperR,
+    lidLowerL: (s) => s.extra?.lidLowerL,
+    lidLowerR: (s) => s.extra?.lidLowerR,
+    'lookDown−UpL': (s) => (s.extra ? s.extra.eyeLookDownLeft - s.extra.eyeLookUpLeft : undefined),
+    'lookDown−UpR': (s) => (s.extra ? s.extra.eyeLookDownRight - s.extra.eyeLookUpRight : undefined),
+  };
+  const separation: Record<string, Record<string, string>> = {};
+  for (const [name, get] of Object.entries(vertical)) {
+    const byRow = [0, 1, 2].map((r) => samples.filter((s) => rowOf(s) === r).map(get).filter((v): v is number => v !== undefined));
+    if (byRow.some((r) => r.length < 2)) continue;
+    const rowMeans = byRow.map(avg);
+    const grand = avg(rowMeans);
+    const between = avg(rowMeans.map((m) => (m - grand) ** 2));
+    const within = avg(byRow.flatMap((r, i) => r.map((v) => (v - rowMeans[i]) ** 2)));
+    separation[name] = {
+      'média cima': rowMeans[0].toFixed(4),
+      'média meio': rowMeans[1].toFixed(4),
+      'média baixo': rowMeans[2].toFixed(4),
+      separação: (between / Math.max(within, 1e-12)).toFixed(2),
+    };
+  }
+  console.log('SINAL VERTICAL — quanto cada candidato separa as linhas (maior = melhor):');
+  console.table(separation);
+
+  // JSON compacto (4 casas, uma linha por amostra) para caber numa mensagem.
+  const r4 = (v: number | undefined) => (v === undefined ? null : Math.round(v * 1e4) / 1e4);
+  const extraKeys = ['lidUpperL', 'lidLowerL', 'lidUpperR', 'lidLowerR', 'eyeLookUpLeft', 'eyeLookUpRight', 'eyeLookDownLeft', 'eyeLookDownRight', 'eyeLookInLeft', 'eyeLookInRight', 'eyeLookOutLeft', 'eyeLookOutRight'];
+  const compact = {
+    screen: [screenW, screenH],
+    cols: ['ponto', 'lx', 'ly', 'rx', 'ry', 'yaw', 'pitch', 'roll', ...extraKeys],
+    rows: samples.map((s) => [
+      s.pointIndex,
+      ...s.features.map(r4),
+      r4(s.headPose.yaw), r4(s.headPose.pitch), r4(s.headPose.roll),
+      ...extraKeys.map((k) => r4(s.extra?.[k])),
+    ]),
+  };
   console.log('COPIE A LINHA ABAIXO E ENVIE:');
-  console.log(JSON.stringify({ screenW, screenH, lambda, samples }));
+  console.log(JSON.stringify(compact));
   console.groupEnd();
 }
