@@ -118,7 +118,7 @@ const nav: Nav = {
       title: `${region.name} · Missão ${mission.index + 1}`,
       rounds: [mission.round],
       environment: region.environment,
-      weapon: weaponById(career.state.equipped),
+      weapons: availableWeapons(),
       tutorial: mission.tutorial,
       goalHits: first.kind === 'hits' ? first.value : undefined,
       missionId: mission.id,
@@ -126,7 +126,7 @@ const nav: Nav = {
     goto('game');
   },
   startArcade: () => {
-    game.start({ mode: 'arcade', title: 'Treino Livre', rounds: ARCADE_ROUNDS, environment: 'lake', weapon: weaponById(career.state.equipped) });
+    game.start({ mode: 'arcade', title: 'Treino Livre', rounds: ARCADE_ROUNDS, environment: 'lake', weapons: availableWeapons() });
     goto('game');
   },
   freeAim: () => {
@@ -178,6 +178,12 @@ function onGameFinished(stats: GameStats, setup: GameSetup): void {
     resultScene.show({ kind: 'mission', mission, stats, achieved, reward, showHook });
   }
   goto('result');
+}
+
+/** Armas compradas, com a equipada primeiro (é a que começa na mão). */
+function availableWeapons() {
+  const owned = career.state.owned.map((id) => weaponById(id));
+  return [...owned.filter((w) => w.id === career.state.equipped), ...owned.filter((w) => w.id !== career.state.equipped)];
 }
 
 function arcadeRecord(): number {

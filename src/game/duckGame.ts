@@ -42,7 +42,8 @@ export interface GameSetup {
   title: string;
   rounds: readonly RoundSpec[];
   environment: EnvironmentId;
-  weapon: WeaponDef;
+  /** Armas disponíveis; a primeira é a que começa na mão. Wink direito alterna entre elas. */
+  weapons: readonly WeaponDef[];
   /** Missão tutorial: mostra dicas passo a passo. */
   tutorial?: boolean;
   /** Meta de patos do objetivo principal, para o HUD. */
@@ -67,9 +68,12 @@ export interface GameStats {
   newRecord: boolean;
 }
 
-/** Munição: levantar as sobrancelhas recarrega. Cada rodada começa com o pente cheio. */
-const BROW_UP_THRESHOLD = 0.5;
-const BROW_RELOAD_HOLD_MS = 250;
+/**
+ * Winks: esquerdo recarrega a arma atual, direito troca de arma. O wink só vale se um olho ficar
+ * fechado por WINK_HOLD_MS com o outro aberto o tempo todo; se o outro olho fechar no meio (o
+ * começo de uma piscada de tiro), o wink é cancelado. Cada rodada começa com os pentes cheios.
+ */
+const WINK_HOLD_MS = 250;
 /** Super: boca aberta (jawOpen) carrega; ~SUPER_CHARGE_MS de boca aberta acumulada enche a barra. */
 const JAW_OPEN_THRESHOLD = 0.4;
 const SUPER_CHARGE_MS = 2000;
@@ -104,7 +108,7 @@ interface Flash {
  * Tiro = piscada deliberada (dois olhos fechados por ≥ BLINK_TRIGGER_MS). A posição do tiro é
  * a da mira preBlinkBufferMs ANTES de os olhos começarem a fechar. O tiro só derruba se o foco
  * naquele instante for ≥ o da arma, e consome o foco todo.
- * Munição: levantar as sobrancelhas recarrega. Super "Rajada": boca aberta enche a barra; cheia,
+ * Munição: wink esquerdo recarrega; wink direito troca de arma. Super "Rajada": boca aberta enche a barra; cheia,
  * a próxima piscada derruba todos os patos da tela, inclusive os blindados.
  * Floresta: só dá para ver e mirar patos dentro do círculo de luz da mira; os Tímidos fogem dela.
  */
@@ -126,9 +130,14 @@ export class DuckGame {
   private closedSince: number | null = null;
   private closureHandled = false;
   private duckSeq = 0;
-  private ammo = 0;
-  private browUpSince: number | null = null;
-  private browHandled = false;
+  /** Munição de cada arma (cada uma guarda a sua; trocar não recarrega). */
+  private ammoByWeapon = new Map<string, number>();
+  private weaponIndex = 0;
+  private winkSide: 'left' | 'right' | null = null;
+  private winkSince = 0;
+  private winkHandled = false;
+  /** Depois que os dois olhos fecharam, nenhum wink conta até os dois reabrirem. */
+  private winkBlocked = false;
   /** Carga do super, 0–1. Fica cheia até ser usada. */
   private superCharge = 0;
   private superFlashAt = -Infinity;
@@ -233,7 +242,7 @@ export class DuckGame {
       ctx.restore();
     }
     if (!setup) return;
-    const needFocus = setup.weapon.focusToShoot(this.config);
+    const needFocus = this.weapon().focusToShoot(this.config);
     if (aim && this.phase === 'wave') drawFocusRing(ctx, aim.cursor.x, aim.cursor.y, this.focus.value, this.focus.value >= needFocus);
     this.drawHud(ctx, screenW, screenH, groundY, needFocus);
     if (setup.tutorial && this.phase === 'wave') this.drawTutorialHint(ctx, screenW, needFocus);
@@ -275,7 +284,7 @@ export class DuckGame {
     this.released = 0;
     this.ducks = [];
     this.focus.reset();
-    this.ammo = this.setup!.weapon.ammo;
+    this.ammoByWeapon = new Map(this.setup!.weapons.map((w) => [w.id, w.ammo]));
     // Sorteia quais patos da rodada são blindados e tímidos (nunca o primeiro, para dar tempo de aprender).
     const slots = Array.from({ length: round.ducks - 1 }, (_, i) => i + 1).sort(() => Math.random() - 0.5);
     this.armoredSlots = new Set(slots.slice(0, round.armored));
@@ -355,26 +364,62 @@ export class DuckGame {
     this.focus.reset();
   }
 
-  // ---------- Expressões: sobrancelhas recarregam, boca carrega o super ----------
+  // ---------- Arma atual e munição ----------
+
+  private weapon(): WeaponDef {
+    const weapons = this.setup!.weapons;
+    return weapons[this.weaponIndex % weapons.length];
+  }
+
+  private get ammo(): number {
+    return this.ammoByWeapon.get(this.weapon().id) ?? 0;
+  }
+
+  private set ammo(value: number) {
+    this.ammoByWeapon.set(this.weapon().id, value);
+  }
+
+  private reload(now: number): void {
+    const capacity = this.weapon().ammo;
+    if (this.ammo >= capacity) return;
+    this.ammo = capacity;
+    this.flashes.push({ x: this.hudShellX - 30, y: this.hudBaseY - 50, at: now, text: 'recarregado', hit: true });
+  }
+
+  private switchWeapon(now: number): void {
+    const weapons = this.setup!.weapons;
+    if (weapons.length < 2) {
+      this.flashes.push({ x: this.hudShellX - 60, y: this.hudBaseY - 50, at: now, text: 'você só tem uma arma', hit: false });
+      return;
+    }
+    this.weaponIndex = (this.weaponIndex + 1) % weapons.length;
+    this.flashes.push({ x: this.hudShellX - 80, y: this.hudBaseY - 50, at: now, text: this.weapon().name, hit: true });
+  }
+
+  // ---------- Expressões: winks (recarga / troca), boca carrega o super ----------
 
   private updateExpressions(frame: FaceFrame, dt: number): void {
     const now = performance.now();
     const t = frame.timestamp;
-    const capacity = this.setup!.weapon.ammo;
 
-    // Recarga: sobrancelhas levantadas por BROW_RELOAD_HOLD_MS; uma recarga por levantada.
-    if ((frame.blendshapes.browInnerUp ?? 0) > BROW_UP_THRESHOLD) {
-      this.browUpSince ??= t;
-      if (!this.browHandled && t - this.browUpSince >= BROW_RELOAD_HOLD_MS) {
-        this.browHandled = true;
-        if (this.ammo < capacity) {
-          this.ammo = capacity;
-          this.flashes.push({ x: 110, y: this.hudBaseY - 40, at: now, text: 'recarregado', hit: true });
-        }
+    // Winks, com proteção contra a piscada de tiro (os dois olhos) ser lida como wink.
+    const side = frame.eyeState.winkLeft ? 'left' : frame.eyeState.winkRight ? 'right' : null;
+    if (frame.eyeState.bothClosed) {
+      this.winkBlocked = true;
+      this.winkSide = null;
+    } else if (!side) {
+      this.winkSide = null;
+      this.winkBlocked = false;
+    } else if (!this.winkBlocked) {
+      if (side !== this.winkSide) {
+        this.winkSide = side;
+        this.winkSince = t;
+        this.winkHandled = false;
+      } else if (!this.winkHandled && t - this.winkSince >= WINK_HOLD_MS) {
+        this.winkHandled = true;
+        if (side === 'left') this.reload(now);
+        else this.switchWeapon(now);
       }
-    } else {
-      this.browUpSince = null;
-      this.browHandled = false;
     }
 
     // Super: boca aberta acumula carga.
@@ -388,7 +433,7 @@ export class DuckGame {
   private shoot(closureStart: number): void {
     if (this.phase !== 'wave') return;
     const setup = this.setup!;
-    const weapon = setup.weapon;
+    const weapon = this.weapon();
     const roundNumber = this.roundIndex + 1;
 
     // Mira de preBlinkBufferMs antes de os olhos começarem a fechar.
@@ -409,7 +454,7 @@ export class DuckGame {
     }
 
     if (this.ammo <= 0) {
-      this.flashes.push({ ...shot.cursor, at: now, text: 'sem munição · levante as sobrancelhas', hit: false });
+      this.flashes.push({ ...shot.cursor, at: now, text: 'sem munição · wink esquerdo recarrega', hit: false });
       return;
     }
     this.ammo--;
@@ -475,7 +520,7 @@ export class DuckGame {
 
   private drawTutorialHint(ctx: CanvasRenderingContext2D, screenW: number, needFocus: number): void {
     let hint: string;
-    if (this.ammo === 0) hint = 'Sem munição: levante as sobrancelhas para recarregar';
+    if (this.ammo === 0) hint = 'Sem munição: feche só o olho ESQUERDO por um instante para recarregar';
     else if (this.superCharge >= 1) hint = 'Super pronto! Feche os olhos por um instante para a Rajada';
     else if (this.focus.value >= needFocus) hint = 'Anel verde: feche os dois olhos por um instante para atirar';
     else if (this.stats.hits >= 2) hint = 'Dica: abra a boca para carregar o super';
@@ -483,8 +528,9 @@ export class DuckGame {
     drawText(ctx, screenW / 2, 84, hint, 20, '#fde68a');
   }
 
-  /** Altura da faixa de HUD na grama (usada também para posicionar avisos). */
+  /** Posição da faixa de HUD na grama (usada também para posicionar avisos). */
   private hudBaseY = 0;
+  private hudShellX = 0;
 
   private drawHud(ctx: CanvasRenderingContext2D, screenW: number, screenH: number, groundY: number, needFocus: number): void {
     const setup = this.setup!;
@@ -502,7 +548,7 @@ export class DuckGame {
     );
     ctx.textAlign = 'right';
     ctx.fillStyle = '#94a3b8';
-    ctx.fillText(setup.mode === 'arcade' ? `Recorde ${this.score.record}` : setup.weapon.name, screenW - 24, 32);
+    ctx.fillText(setup.mode === 'arcade' ? `Recorde ${this.score.record}` : this.weapon().name, screenW - 24, 32);
     ctx.restore();
 
     // Placar da rodada: patinhos na grama (amarelo = abatido, vermelho = fugiu; anel = especial).
@@ -528,7 +574,8 @@ export class DuckGame {
 
     // Munição (direita da grama): cartuchos; aviso quando vazio.
     const shellX = screenW - 24;
-    for (let i = 0; i < setup.weapon.ammo; i++) {
+    this.hudShellX = shellX;
+    for (let i = 0; i < this.weapon().ammo; i++) {
       ctx.fillStyle = i < this.ammo ? '#f59e0b' : 'rgba(248, 250, 252, 0.2)';
       ctx.fillRect(shellX - (i + 1) * 20, baseY - 14, 12, 28);
     }
@@ -536,11 +583,13 @@ export class DuckGame {
     ctx.font = `600 13px system-ui, 'Segoe UI', sans-serif`;
     ctx.textAlign = 'right';
     ctx.fillStyle = '#f8fafc';
-    ctx.fillText('MUNIÇÃO', shellX, baseY - 26);
-    if (this.ammo === 0 && this.phase === 'wave') {
-      ctx.fillStyle = '#fca5a5';
-      ctx.fillText('levante as sobrancelhas', shellX, baseY + 30);
-    }
+    ctx.fillText(this.weapon().name.toUpperCase(), shellX, baseY - 26);
+    ctx.fillStyle = this.ammo === 0 && this.phase === 'wave' ? '#fca5a5' : '#94a3b8';
+    ctx.fillText(
+      setup.weapons.length > 1 ? 'wink ← recarrega · wink → troca' : 'wink ← recarrega',
+      shellX,
+      baseY + 30,
+    );
     ctx.restore();
 
     // Super (acima da barra de foco): enche com a boca aberta; cheio pisca.
