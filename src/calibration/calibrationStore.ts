@@ -3,8 +3,8 @@ import { fitRidge, predict } from './ridgeRegression';
 
 type HeadPose = FaceFrame['headPose'];
 
-// v3: features por eixo (X: íris; Y: íris + pálpebra + eyeLook). v2 era linear 4 features nos dois eixos.
-export const CALIBRATION_VERSION = 3;
+// v4: média dos dois olhos por sinal (v3 usava cada olho separado; pesos opostos amplificavam tremor).
+export const CALIBRATION_VERSION = 4;
 const STORAGE_KEY = `duck-of-duty.calibration.v${CALIBRATION_VERSION}`;
 
 export interface CalibrationModel {
@@ -39,17 +39,21 @@ export type CalibrationStatus = 'absent' | 'loaded' | 'trained';
 type Expand = (base: number[]) => number[];
 
 /**
- * Termos da regressão de X de tela: [1, lx, rx]  (só a íris).
- * Termos da regressão de Y de tela: [1, ly, ry, lidUpL, lidUpR, lookDUL, lookDUR].
+ * Termos da regressão de X de tela: [1, média(lx, rx)]  (só a íris).
+ * Termos da regressão de Y de tela: [1, média(ly, ry), média(lidUpL, lidUpR), média(lookDUL, lookDUR)].
  *
  * Histórico, medido por leave-one-out nas amostras reais:
  *  - especificação original, 11 termos quadráticos nos dois eixos: 305 px (ajustava ruído);
  *  - linear [lx, ly, rx, ry] nos dois eixos: 134–157 px, quase todo o erro em Y;
- *  - por eixo, como aqui: 106 px (X 61, Y 73). A íris sozinha distingue mal as
- *    linhas da grade; pálpebra superior e eyeLook completam o sinal vertical.
+ *  - por eixo, cada olho separado: 106–109 px, mas pesos enormes e de sinais opostos entre
+ *    olho esquerdo e direito (+10.580 × −1.889 px por unidade) amplificavam o tremor frame
+ *    a frame (~110–150 px em Y);
+ *  - por eixo, média dos olhos, λ = 1 (atual): 108–119 px com tremor estimado ~40–50% menor.
+ * Os dois lados medem quase o mesmo sinal: a média reduz o ruído em vez de deixar a regressão
+ * equilibrar pesos grandes que se cancelam.
  */
-export const expandX: Expand = (b) => [1, b[0], b[2]];
-export const expandY: Expand = (b) => [1, b[1], b[3], b[4], b[5], b[6], b[7]];
+export const expandX: Expand = (b) => [1, (b[0] + b[2]) / 2];
+export const expandY: Expand = (b) => [1, (b[1] + b[3]) / 2, (b[4] + b[5]) / 2, (b[6] + b[7]) / 2];
 
 export function median(values: number[]): number {
   const s = [...values].sort((a, b) => a - b);
@@ -239,8 +243,9 @@ function logCalibrationDiagnostics(samples: CalibrationSample[], lambda: number,
   const avg = (v: number[]) => v.reduce((a, b) => a + b, 0) / Math.max(v.length, 1);
   const iris4: Expand = (b) => [1, b[0], b[1], b[2], b[3]];
   const models: Record<string, [Expand, Expand]> = {
-    'atual: X íris · Y íris+pálpebra+eyeLook': [expandX, expandY],
-    'anterior: íris (4) nos dois eixos': [iris4, iris4],
+    'atual: média dos olhos, por eixo': [expandX, expandY],
+    'anterior: cada olho separado, por eixo': [(b) => [1, b[0], b[2]], (b) => [1, b[1], b[3], b[4], b[5], b[6], b[7]]],
+    'íris (4) nos dois eixos': [iris4, iris4],
   };
 
   const table: Record<string, Record<string, string>> = {};

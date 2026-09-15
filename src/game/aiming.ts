@@ -2,8 +2,6 @@ import type { CalibrationStore } from '../calibration/calibrationStore';
 import { OneEuroFilter } from '../tracking/oneEuroFilter';
 import type { DebugConfig, FaceFrame } from '../types';
 
-/** Alcance angular (após a zona morta) que leva a contribuição da cabeça do centro até a borda. */
-const HEAD_RANGE_DEG = 20;
 /** Quanto histórico da contribuição do olho guardar para o congelamento na piscada. */
 const EYE_HISTORY_MS = 1000;
 /**
@@ -13,6 +11,8 @@ const EYE_HISTORY_MS = 1000;
  */
 const SNAP_LAG_MS = 150;
 const TARGET_HISTORY_MS = 400;
+/** A mira congela quando o eyeBlink sobe esta fração de blinkRise acima do repouso (início da piscada). */
+const BLINK_ONSET_FRACTION = 0.6;
 
 export interface AimTarget {
   id: string;
@@ -21,32 +21,46 @@ export interface AimTarget {
 }
 
 export interface AimState {
-  /** Cursor final (após filtro e snap), px CSS. */
+  /** Cursor final (após filtros e snap), px CSS. */
   cursor: { x: number; y: number };
-  /** Cursor filtrado antes do snap. */
+  /** Cursor antes do snap. */
   unsnapped: { x: number; y: number };
   snappedTargetId: string | null;
-  /** Contribuição da cabeça como deslocamento do centro, SEM o peso. */
+  /** Contribuição da cabeça (filtrada), px a partir do centro: headGain · Δcabeça. */
   headOffset: { x: number; y: number };
-  /** Contribuição do olho como deslocamento do centro, SEM o peso. null sem modelo. */
+  /** Contribuição do olho (filtrada), px a partir do centro. null sem modelo. */
   eyeOffset: { x: number; y: number } | null;
   headDelta: { yaw: number; pitch: number; roll: number };
   hasModel: boolean;
+  /** A contribuição do olho está congelada por uma piscada em curso. */
+  eyeFrozen: boolean;
 }
 
 /**
  * Único lugar onde os sinais de cabeça e olho se encontram.
  *
- *   1. cabeça: delta = headPose − headBaseline → zona morta → graus para px
- *   2. olho:   calibrationStore.apply(features) − centro, limitado a ±eyeMaxOffset
- *   3. fusão:  centro + headWeight·cabeça + (1 − headWeight)·olho
- *              (sem modelo: centro + cabeça)
- *   4. filtro One Euro próprio (cursorMinCutoff / cursorBeta)
- *   5. snap magnético com histerese
+ *   1. cabeça: Δ = headPose − headBaseline → zona morta → headGain px/grau (igual em X e Y)
+ *              → filtro 1€ leve (headMinCutoff / headBeta)
+ *   2. olho:   calibrationStore.apply(features) − centro, limitado a ±eyeMaxOffset,
+ *              congelado durante piscadas → filtro 1€ forte (eyeMinCutoff / eyeBeta)
+ *   3. fusão por SOMA: centro + olho + cabeça
+ *   4. snap magnético com histerese (compensando o atraso de alvos em movimento)
+ *
+ * Por que soma e não média: o ponto olhado na tela é direção da cabeça + direção do olho
+ * dentro da cabeça. O modelo do olho foi calibrado com a cabeça parada na baseline; se a
+ * cabeça gira Δ graus e você continua olhando o mesmo ponto, o olho gira −Δ dentro da órbita
+ * (o modelo lê ≈ −Δ·px/grau) e a cabeça soma +headGain·Δ — os dois se cancelam e a mira fica
+ * no ponto. Com média ponderada eles não se cancelavam e a mira escorregava para o lado
+ * contrário do movimento da cabeça. headGain ≈ px por grau de olhar na sua distância da tela.
+ *
+ * Os filtros são separados porque a cabeça é um sinal limpo (bom para seguir movimento) e o
+ * olho é ruidoso (precisa de mais suavização); um filtro único depois da soma tratava os dois igual.
  */
 export class Aiming {
-  private readonly filterX: OneEuroFilter;
-  private readonly filterY: OneEuroFilter;
+  private readonly eyeFilterX = new OneEuroFilter(0.5, 0.005, 1);
+  private readonly eyeFilterY = new OneEuroFilter(0.5, 0.005, 1);
+  private readonly headFilterX = new OneEuroFilter(1.5, 0.02, 1);
+  private readonly headFilterY = new OneEuroFilter(1.5, 0.02, 1);
   /** Previsões do olho (deslocamento do centro, sem clamp) dos frames com olhos abertos. */
   private eyeHistory: { t: number; offset: { x: number; y: number } }[] = [];
   /** Deslocamento congelado durante uma piscada, e até quando segurar. */
@@ -60,10 +74,7 @@ export class Aiming {
   constructor(
     private readonly config: DebugConfig,
     private readonly store: CalibrationStore,
-  ) {
-    this.filterX = new OneEuroFilter(config.cursorMinCutoff, config.cursorBeta, config.dCutoff);
-    this.filterY = new OneEuroFilter(config.cursorMinCutoff, config.cursorBeta, config.dCutoff);
-  }
+  ) {}
 
   getState(): AimState | null {
     return this.state;
@@ -77,6 +88,8 @@ export class Aiming {
     const model = this.store.model;
     const cx = screenW / 2;
     const cy = screenH / 2;
+    const now = frame.timestamp;
+    const t = now / 1000;
 
     // 1. Cabeça. Sem modelo não há baseline; usamos pose zero.
     const base = model?.headBaseline ?? { yaw: 0, pitch: 0, roll: 0 };
@@ -86,28 +99,26 @@ export class Aiming {
       roll: frame.headPose.roll - base.roll,
     };
     // Zona morta suave: subtrai a zona em vez de zerar, para o cursor não pular na borda dela.
-    const yaw = softDeadzone(headDelta.yaw, c.headDeadzone);
-    const pitch = softDeadzone(headDelta.pitch, c.headDeadzone);
     // yaw positivo → direita; pitch positivo → cima (Y da tela cresce para baixo).
     // Se ficar invertido, troque YAW_SIGN / PITCH_SIGN em headPose.ts.
+    this.headFilterX.updateParams(c.headMinCutoff, c.headBeta, c.dCutoff);
+    this.headFilterY.updateParams(c.headMinCutoff, c.headBeta, c.dCutoff);
     const headOffset = {
-      x: yaw * (cx / HEAD_RANGE_DEG),
-      y: -pitch * (cy / HEAD_RANGE_DEG),
+      x: this.headFilterX.filter(softDeadzone(headDelta.yaw, c.headDeadzone) * c.headGain, t),
+      y: this.headFilterY.filter(-softDeadzone(headDelta.pitch, c.headDeadzone) * c.headGain, t),
     };
 
     // 2. Olho, com congelamento na piscada.
-    // O modelo de Y usa pálpebra e eyeLook; no começo de uma piscada a pálpebra desce
-    // antes de o olho contar como fechado, e a mira "pularia" para baixo. Então, assim
-    // que qualquer olho passa de doubleBlinkThreshold (ou as features somem), a
-    // contribuição do olho congela no valor de preBlinkBufferMs ANTES disso, e só volta
-    // a seguir o olho preBlinkBufferMs depois que os olhos reabrem.
+    // O modelo de Y usa pálpebra e eyeLook; no começo de uma piscada a pálpebra desce antes
+    // de o olho contar como fechado, e a mira "pularia" para baixo. Então, assim que qualquer
+    // eyeBlink sobe BLINK_ONSET_FRACTION·blinkRise acima do repouso (ou as features somem), a
+    // contribuição do olho congela no valor de preBlinkBufferMs ANTES disso, e só volta a
+    // seguir o olho preBlinkBufferMs depois que a subida some.
     let eyeOffset: { x: number; y: number } | null = null;
+    let eyeFrozen = false;
     if (model) {
-      const now = frame.timestamp;
-      const blinkL = frame.blendshapes.eyeBlinkLeft ?? 0;
-      const blinkR = frame.blendshapes.eyeBlinkRight ?? 0;
-      const closing = !frame.gazeFeatures || blinkL > c.doubleBlinkThreshold || blinkR > c.doubleBlinkThreshold;
-
+      const onset = c.blinkRise * BLINK_ONSET_FRACTION;
+      const closing = !frame.gazeFeatures || frame.blinkRise.left > onset || frame.blinkRise.right > onset;
       if (closing) {
         if (now >= this.holdUntil || !this.frozenEye) this.frozenEye = this.eyeOffsetAgo(now, c.preBlinkBufferMs);
         this.holdUntil = now + c.preBlinkBufferMs;
@@ -116,6 +127,7 @@ export class Aiming {
       let current: { x: number; y: number } | null;
       if (now < this.holdUntil) {
         current = this.frozenEye;
+        eyeFrozen = true;
       } else {
         this.frozenEye = null;
         const eye = this.store.apply(frame.gazeFeatures!);
@@ -125,47 +137,38 @@ export class Aiming {
           while (this.eyeHistory.length > 0 && this.eyeHistory[0].t < now - EYE_HISTORY_MS) this.eyeHistory.shift();
         }
       }
-      eyeOffset = current
-        ? { x: clamp(current.x, -c.eyeMaxOffset, c.eyeMaxOffset), y: clamp(current.y, -c.eyeMaxOffset, c.eyeMaxOffset) }
-        : null;
+      if (current) {
+        this.eyeFilterX.updateParams(c.eyeMinCutoff, c.eyeBeta, c.dCutoff);
+        this.eyeFilterY.updateParams(c.eyeMinCutoff, c.eyeBeta, c.dCutoff);
+        eyeOffset = {
+          x: this.eyeFilterX.filter(clamp(current.x, -c.eyeMaxOffset, c.eyeMaxOffset), t),
+          y: this.eyeFilterY.filter(clamp(current.y, -c.eyeMaxOffset, c.eyeMaxOffset), t),
+        };
+      }
     } else {
       this.eyeHistory = [];
       this.frozenEye = null;
+      this.eyeFilterX.reset();
+      this.eyeFilterY.reset();
     }
 
-    // 3. Fusão.
-    let rawX: number;
-    let rawY: number;
-    if (model) {
-      const e = eyeOffset ?? { x: 0, y: 0 };
-      rawX = cx + c.headWeight * headOffset.x + (1 - c.headWeight) * e.x;
-      rawY = cy + c.headWeight * headOffset.y + (1 - c.headWeight) * e.y;
-    } else {
-      rawX = cx + headOffset.x;
-      rawY = cy + headOffset.y;
-    }
-
-    // 4. Suavização (filtro separado do gazeFiltered do M0).
-    const t = frame.timestamp / 1000;
-    this.filterX.updateParams(c.cursorMinCutoff, c.cursorBeta, c.dCutoff);
-    this.filterY.updateParams(c.cursorMinCutoff, c.cursorBeta, c.dCutoff);
+    // 3. Fusão por soma.
+    const e = eyeOffset ?? { x: 0, y: 0 };
     const unsnapped = {
-      x: clamp(this.filterX.filter(rawX, t), 0, screenW),
-      y: clamp(this.filterY.filter(rawY, t), 0, screenH),
+      x: clamp(cx + e.x + headOffset.x, 0, screenW),
+      y: clamp(cy + e.y + headOffset.y, 0, screenH),
     };
 
-    // 5. Snap com histerese: gruda abaixo de snapRadius, só solta acima de snapRadius + snapHysteresis.
+    // 4. Snap com histerese: gruda abaixo de snapRadius, só solta acima de snapRadius + snapHysteresis.
     // A distância usada é a menor entre a posição atual do alvo e a de SNAP_LAG_MS atrás
     // (para alvos parados as duas são iguais).
-    this.recordTargets(frame.timestamp, targets);
+    this.recordTargets(now, targets);
     const snapDistance = (tg: AimTarget) => {
-      const past = this.targetPositionAgo(tg.id, frame.timestamp, SNAP_LAG_MS);
+      const past = this.targetPositionAgo(tg.id, now, SNAP_LAG_MS);
       return Math.min(distance(unsnapped, tg), past ? distance(unsnapped, past) : Infinity);
     };
-    const current = this.snappedId ? targets.find((tg) => tg.id === this.snappedId) : undefined;
-    if (current && snapDistance(current) <= c.snapRadius + c.snapHysteresis) {
-      // continua grudado
-    } else {
+    const snappedNow = this.snappedId ? targets.find((tg) => tg.id === this.snappedId) : undefined;
+    if (!(snappedNow && snapDistance(snappedNow) <= c.snapRadius + c.snapHysteresis)) {
       this.snappedId = null;
       let best: AimTarget | null = null;
       let bestDist = c.snapRadius;
@@ -188,6 +191,7 @@ export class Aiming {
       eyeOffset,
       headDelta,
       hasModel: !!model,
+      eyeFrozen,
     };
     return this.state;
   }

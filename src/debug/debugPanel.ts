@@ -27,18 +27,21 @@ const SLIDERS: { key: keyof DebugConfig; min: number; max: number; step: number;
   { key: 'winkCounterThreshold', min: 0, max: 1, step: 0.01 },
   { key: 'winkMinFrames', min: 1, max: 10, step: 1 },
   { key: 'doubleBlinkThreshold', min: 0, max: 1, step: 0.01 },
+  { key: 'blinkRise', min: 0.05, max: 1, step: 0.01 },
   { key: 'minCutoff', min: 0.01, max: 5, step: 0.01 },
   { key: 'beta', min: 0, max: 1, step: 0.001 },
   { key: 'dCutoff', min: 0.1, max: 5, step: 0.1 },
   { key: 'preBlinkBufferMs', min: 0, max: 600, step: 10 },
   { key: 'snapRadius', min: 0, max: 200, step: 5 },
   { key: 'snapHysteresis', min: 0, max: 100, step: 5 },
-  { key: 'headWeight', min: 0, max: 1, step: 0.01 },
+  { key: 'headGain', min: 0, max: 120, step: 1 },
   { key: 'headDeadzone', min: 0, max: 10, step: 0.5 },
-  { key: 'eyeMaxOffset', min: 0, max: 600, step: 10 },
-  { key: 'ridgeLambda', min: -6, max: 0, step: 0.1, log: true }, // 1e-6 … 1
-  { key: 'cursorMinCutoff', min: 0.01, max: 5, step: 0.01 },
-  { key: 'cursorBeta', min: 0, max: 1, step: 0.001 },
+  { key: 'eyeMaxOffset', min: 0, max: 2000, step: 10 },
+  { key: 'ridgeLambda', min: -6, max: 1, step: 0.1, log: true }, // 1e-6 … 10
+  { key: 'eyeMinCutoff', min: 0.01, max: 5, step: 0.01 },
+  { key: 'eyeBeta', min: 0, max: 0.2, step: 0.001 },
+  { key: 'headMinCutoff', min: 0.01, max: 5, step: 0.01 },
+  { key: 'headBeta', min: 0, max: 0.5, step: 0.001 },
   { key: 'duckSpeed', min: 50, max: 600, step: 10 },
   { key: 'duckEscapeMs', min: 2000, max: 15000, step: 500 },
   { key: 'focusFillPerSec', min: 0.1, max: 5, step: 0.05 },
@@ -58,6 +61,9 @@ export interface DebugPanelActions {
   onRecalibrate(): void;
   onClearCalibration(): void;
 }
+
+/** Onde os valores dos sliders ficam salvos entre recargas. */
+const CONFIG_STORAGE_KEY = 'duck-of-duty.config.v1';
 
 interface ChartSample {
   t: number;
@@ -82,12 +88,18 @@ export class DebugPanel {
   private readonly residualCells: HTMLDivElement[] = [];
   private readonly calibHeadEl: HTMLDivElement;
   private readonly samples: ChartSample[] = [];
+  /** Atualiza cada slider para o valor atual do config (usado ao restaurar os padrões). */
+  private readonly sliderRefreshers: (() => void)[] = [];
 
   constructor(
     private readonly config: DebugConfig,
     private readonly video: HTMLVideoElement,
     actions: DebugPanelActions,
+    private readonly defaults: Readonly<DebugConfig>,
   ) {
+    // Valores salvos pelo jogador valem por cima dos padrões, antes de construir os sliders.
+    this.loadSavedConfig();
+
     this.root = el('div', 'debug-panel');
 
     // 1. Vídeo + landmarks
@@ -118,6 +130,10 @@ export class DebugPanel {
     // 4. Sliders
     const sliders = el('div', 'sliders');
     for (const def of SLIDERS) sliders.append(this.buildSlider(def));
+    const restoreBtn = el('button', 'panel-btn');
+    restoreBtn.textContent = 'Restaurar padrões';
+    restoreBtn.addEventListener('click', () => this.restoreDefaults());
+    sliders.append(restoreBtn);
     this.root.append(section('DebugConfig', sliders));
 
     // 5. FPS
@@ -126,7 +142,7 @@ export class DebugPanel {
 
     // 6. LEDs
     const ledRow = el('div', 'leds');
-    for (const name of ['winkLeft', 'winkRight', 'bothClosed', 'jawOpen > 0.5', 'browInnerUp > 0.5']) {
+    for (const name of ['winkLeft', 'winkRight', 'bothClosed', 'mira congelada', 'jawOpen > 0.5', 'browInnerUp > 0.5']) {
       const item = el('div', 'led-item');
       const led = el('span', 'led');
       item.append(led, document.createTextNode(name));
@@ -152,7 +168,7 @@ export class DebugPanel {
     }
     this.calibHeadEl = el('div', 'readout');
     const canvasLegend = el('div', 'legend');
-    canvasLegend.append(dot('#22d3ee', 'cabeça (sem peso)'), dot('#e879f9', 'olho (sem peso)'), dot('#f8fafc', 'cursor final'));
+    canvasLegend.append(dot('#22d3ee', 'cabeça'), dot('#e879f9', 'olho'), dot('#f8fafc', 'cursor = centro + olho + cabeça'));
     const recalibrateBtn = el('button', 'panel-btn');
     recalibrateBtn.textContent = 'Recalibrar';
     recalibrateBtn.addEventListener('click', () => actions.onRecalibrate());
@@ -216,6 +232,7 @@ export class DebugPanel {
     setLed(this.leds['winkLeft'], !!frame?.eyeState.winkLeft);
     setLed(this.leds['winkRight'], !!frame?.eyeState.winkRight);
     setLed(this.leds['bothClosed'], !!frame?.eyeState.bothClosed);
+    setLed(this.leds['mira congelada'], !!calib.aim?.eyeFrozen);
     setLed(this.leds['jawOpen > 0.5'], (b.jawOpen ?? 0) > 0.5);
     setLed(this.leds['browInnerUp > 0.5'], (b.browInnerUp ?? 0) > 0.5);
 
@@ -282,10 +299,48 @@ export class DebugPanel {
       // Muta o objeto compartilhado: os módulos leem o novo valor no próximo frame.
       this.config[def.key] = def.log ? 10 ** Number(input.value) : Number(input.value);
       value.textContent = format(this.config[def.key]);
+      this.saveConfig();
+    });
+    this.sliderRefreshers.push(() => {
+      input.value = String(def.log ? Math.log10(this.config[def.key]) : this.config[def.key]);
+      value.textContent = format(this.config[def.key]);
     });
 
     row.append(head, input);
     return row;
+  }
+
+  /** Aplica no config os valores salvos (só chaves conhecidas e numéricas; ignora campos antigos). */
+  private loadSavedConfig(): void {
+    try {
+      const raw = localStorage.getItem(CONFIG_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Record<string, unknown>;
+      for (const key of Object.keys(this.defaults) as (keyof DebugConfig)[]) {
+        const v = saved[key];
+        if (typeof v === 'number' && Number.isFinite(v)) this.config[key] = v;
+      }
+    } catch (err) {
+      console.warn('[painel] não foi possível ler a configuração salva', err);
+    }
+  }
+
+  private saveConfig(): void {
+    try {
+      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(this.config));
+    } catch (err) {
+      console.warn('[painel] não foi possível salvar a configuração', err);
+    }
+  }
+
+  private restoreDefaults(): void {
+    Object.assign(this.config, this.defaults);
+    try {
+      localStorage.removeItem(CONFIG_STORAGE_KEY);
+    } catch {
+      // sem localStorage: os padrões valem só nesta sessão
+    }
+    for (const refresh of this.sliderRefreshers) refresh();
   }
 
   private drawLandmarks(landmarks: ReadonlyArray<{ x: number; y: number }> | null): void {

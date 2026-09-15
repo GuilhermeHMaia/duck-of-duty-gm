@@ -63,6 +63,7 @@ export class FaceTracker {
         eyeState: { leftOpen: 0, rightOpen: 0, bothClosed: false, winkLeft: false, winkRight: false },
         faceDetected: false,
         gazeFeatures: null,
+        blinkRise: { left: 0, right: 0 },
       };
     }
     this.landmarks = faceLandmarks;
@@ -75,7 +76,7 @@ export class FaceTracker {
     const matrix = result.facialTransformationMatrixes[0];
     const headPose = matrix ? extractHeadPose(matrix.data) : { yaw: 0, pitch: 0, roll: 0 };
 
-    const { eyeState } = this.blink.update(blendshapes);
+    const { eyeState, blinkRise, eitherClosed } = this.blink.update(blendshapes, ts);
 
     const gazeRaw = this.gaze.estimate(faceLandmarks, video.videoWidth, video.videoHeight, eyeState);
 
@@ -87,8 +88,8 @@ export class FaceTracker {
       ? { x: this.filterX.filter(gazeRaw.x, ts / 1000), y: this.filterY.filter(gazeRaw.y, ts / 1000) }
       : null;
 
-    const gazeFeatures = extractGazeFeatures(faceLandmarks, video.videoWidth, video.videoHeight, eyeState, c.doubleBlinkThreshold, blendshapes);
+    const gazeFeatures = extractGazeFeatures(faceLandmarks, video.videoWidth, video.videoHeight, eitherClosed, blendshapes);
 
-    return { timestamp: ts, gazeRaw, gazeFiltered, headPose, blendshapes, eyeState, faceDetected: true, gazeFeatures };
+    return { timestamp: ts, gazeRaw, gazeFiltered, headPose, blendshapes, eyeState, faceDetected: true, gazeFeatures, blinkRise };
   }
 }

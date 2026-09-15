@@ -10,29 +10,34 @@ import type { DebugConfig, FaceFrame } from './types';
 
 // Criado uma única vez e compartilhado por referência. O painel muta este objeto;
 // os módulos leem os campos a cada frame.
-const config: DebugConfig = {
+const DEFAULT_CONFIG: Readonly<DebugConfig> = {
   winkThreshold: 0.5,
   winkCounterThreshold: 0.25,
   winkMinFrames: 2,
-  doubleBlinkThreshold: 0.5,
+  doubleBlinkThreshold: 0.8,
+  blinkRise: 0.35,
   minCutoff: 1.0,
   beta: 0.007,
   dCutoff: 1.0,
   preBlinkBufferMs: 180,
   snapRadius: 110,
   snapHysteresis: 60,
-  headWeight: 0.65,
-  headDeadzone: 3.0,
-  eyeMaxOffset: 150,
-  ridgeLambda: 0.001,
-  cursorMinCutoff: 1.0,
-  cursorBeta: 0.15,
+  headGain: 45,
+  headDeadzone: 0,
+  eyeMaxOffset: 1200,
+  ridgeLambda: 1,
+  eyeMinCutoff: 0.5,
+  eyeBeta: 0.005,
+  headMinCutoff: 1.5,
+  headBeta: 0.02,
   duckSpeed: 130,
   duckEscapeMs: 9000,
   focusFillPerSec: 1.25,
   focusDecayPerSec: 0.3,
   focusToShoot: 0.6,
 };
+// O painel aplica por cima os valores salvos pelo jogador (localStorage) antes de qualquer módulo ler.
+const config: DebugConfig = { ...DEFAULT_CONFIG };
 
 const TRAIL_LENGTH = 12;
 
@@ -79,7 +84,7 @@ const panel = new DebugPanel(config, video, {
     scene.start();
   },
   onClearCalibration: () => store.clear(),
-});
+}, DEFAULT_CONFIG);
 const scene = new CalibrationScene(store, buffer, {
   setPanelCollapsed: (collapsed) => panel.setCollapsed(collapsed),
   startGame: () => {
@@ -225,7 +230,12 @@ function render(now: number): void {
   ctx.fillStyle = '#0b0d12';
   ctx.fillRect(0, 0, screenW(), screenH());
 
-  const aim = aiming.getState();
+  let aim = aiming.getState();
+  if (aim?.snappedTargetId) {
+    const liveTargets = activeScene === 'game' ? game.getTargets() : scene.getTargets(screenW(), screenH());
+    const live = liveTargets.find((tg) => tg.id === aim!.snappedTargetId);
+    if (live) aim = { ...aim, cursor: { x: live.x, y: live.y } };
+  }
   if (activeScene === 'game') game.render(ctx, now, screenW(), screenH(), aim);
   else scene.render(ctx, now, screenW(), screenH(), aim);
 

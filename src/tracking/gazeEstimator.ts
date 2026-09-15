@@ -105,19 +105,18 @@ export const GAZE_FEATURE_NAMES = ['lx', 'ly', 'rx', 'ry', 'lidUpL', 'lidUpR', '
  * olho remove a inclinação da cabeça. Qual feature entra em cada eixo é decidido em
  * calibrationStore (X usa só a íris; Y usa íris + pálpebra + eyeLook).
  *
- * Retorna null se qualquer olho estiver fechado: eyeBlink > closedThreshold
- * (o doubleBlinkThreshold, mesmo critério do gazeRaw). Um olho semicerrado, como ao
+ * Retorna null se qualquer olho estiver fechado (eitherEyeClosed, decidido pelo
+ * BlinkDetector pela subida do eyeBlink acima do repouso). Um olho semicerrado, como ao
  * olhar para baixo, continua valendo como aberto.
  */
 export function extractGazeFeatures(
   landmarks: ReadonlyArray<Point>,
   imageWidth: number,
   imageHeight: number,
-  eyeState: FaceFrame['eyeState'],
-  closedThreshold: number,
+  eitherEyeClosed: boolean,
   blendshapes: Record<string, number>,
 ): number[] | null {
-  if (1 - eyeState.leftOpen > closedThreshold || 1 - eyeState.rightOpen > closedThreshold) return null;
+  if (eitherEyeClosed) return null;
   const toPx = (i: number): Point => ({ x: landmarks[i].x * imageWidth, y: landmarks[i].y * imageHeight });
   const left = irisOffsetFromCorners(LEFT_EYE, toPx);
   const right = irisOffsetFromCorners(RIGHT_EYE, toPx);
