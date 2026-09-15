@@ -4,9 +4,12 @@ import { CalibrationStore } from './calibration/calibrationStore';
 import { DebugPanel } from './debug/debugPanel';
 import { Aiming, type AimState } from './game/aiming';
 import { CareerStore } from './career/careerStore';
-import { evaluateMission, missionById, missionsOf, regionById } from './career/missions';
+import { dailyChallenge } from './career/daily';
+import { evaluateMission, missionById, regionById } from './career/missions';
+import { COMPLETION_HOOKS } from './career/story';
 import { ARCADE_ROUNDS, DuckGame, type GameSetup, type GameStats } from './game/duckGame';
-import { weaponById } from './game/weapons';
+import { sfx } from './game/sound';
+import { AchievementsScene } from './scenes/achievementsScene';
 import { ArsenalScene } from './scenes/arsenalScene';
 import { BriefingScene } from './scenes/briefingScene';
 import { MapScene } from './scenes/mapScene';
@@ -86,7 +89,7 @@ career.load();
 
 // ---------- Cenas e navegação ----------
 
-type SceneId = 'calibration' | 'menu' | 'map' | 'briefing' | 'arsenal' | 'result' | 'game';
+type SceneId = 'calibration' | 'menu' | 'map' | 'briefing' | 'arsenal' | 'achievements' | 'result' | 'game';
 /** Cena ativa: calibração (Estande / mira livre), telas de menu ou a partida. */
 let activeScene: SceneId = 'calibration';
 
@@ -118,7 +121,7 @@ const nav: Nav = {
       title: `${region.name} · Missão ${mission.index + 1}`,
       rounds: [mission.round],
       environment: region.environment,
-      weapons: availableWeapons(),
+      weapons: career.loadout(),
       tutorial: mission.tutorial,
       goalHits: first.kind === 'hits' ? first.value : undefined,
       missionId: mission.id,
@@ -126,9 +129,15 @@ const nav: Nav = {
     goto('game');
   },
   startArcade: () => {
-    game.start({ mode: 'arcade', title: 'Treino Livre', rounds: ARCADE_ROUNDS, environment: 'lake', weapons: availableWeapons() });
+    game.start({ mode: 'arcade', title: 'Treino Livre', rounds: ARCADE_ROUNDS, environment: 'lake', weapons: career.loadout() });
     goto('game');
   },
+  startDaily: () => {
+    const daily = dailyChallenge();
+    game.start({ mode: 'daily', title: `Desafio Diário · ${daily.environmentName}`, rounds: [daily.round], environment: daily.environment, weapons: career.loadout() });
+    goto('game');
+  },
+  achievements: () => goto('achievements'),
   freeAim: () => {
     scene.showFreeAim();
     goto('calibration');
@@ -150,12 +159,14 @@ const mapScene = new MapScene(config, career, nav);
 const briefingScene = new BriefingScene(config, career, nav);
 const arsenalScene = new ArsenalScene(config, career);
 const resultScene = new ResultScene(config, nav);
+const achievementsScene = new AchievementsScene(config, career, nav);
 const buttonScenes: Partial<Record<SceneId, ButtonScene>> = {
   menu: menuScene,
   map: mapScene,
   briefing: briefingScene,
   arsenal: arsenalScene,
   result: resultScene,
+  achievements: achievementsScene,
 };
 
 function goto(id: SceneId): void {
@@ -167,23 +178,24 @@ function goto(id: SceneId): void {
 
 function onGameFinished(stats: GameStats, setup: GameSetup): void {
   if (setup.mode === 'arcade') {
-    resultScene.show({ kind: 'arcade', stats, record: Math.max(stats.score, arcadeRecord()) });
+    const achievements = career.recordGame(stats, setup);
+    resultScene.show({ kind: 'arcade', stats, record: Math.max(Math.round(stats.score), arcadeRecord()), achievements });
+  } else if (setup.mode === 'daily') {
+    const daily = dailyChallenge();
+    const { penas, best, newBest } = career.recordDaily(daily.date, Math.round(stats.score), stats.hits);
+    const achievements = career.recordGame(stats, setup);
+    resultScene.show({ kind: 'daily', stats, best, newBest, penas, placeName: daily.environmentName, achievements });
   } else {
     const mission = missionById(setup.missionId ?? '')!;
-    const lastOfRegion = missionsOf(mission.region).at(-1)!.id === mission.id;
     const wasCompleted = career.starsOf(mission.id) > 0;
     const achieved = evaluateMission(mission, stats);
     const reward = career.recordResult(mission, achieved, stats.hits);
-    const showHook = mission.region === 'floresta' && lastOfRegion && !wasCompleted && achieved[0];
-    resultScene.show({ kind: 'mission', mission, stats, achieved, reward, showHook });
+    const achievements = career.recordGame(stats, setup, achieved);
+    const hook = !wasCompleted && achieved[0] ? (COMPLETION_HOOKS[mission.id] ?? []) : [];
+    if (reward.newStars > 0) sfx.star();
+    resultScene.show({ kind: 'mission', mission, stats, achieved, reward, hook, achievements });
   }
   goto('result');
-}
-
-/** Armas compradas, com a equipada primeiro (é a que começa na mão). */
-function availableWeapons() {
-  const owned = career.state.owned.map((id) => weaponById(id));
-  return [...owned.filter((w) => w.id === career.state.equipped), ...owned.filter((w) => w.id !== career.state.equipped)];
 }
 
 function arcadeRecord(): number {
@@ -195,6 +207,9 @@ function arcadeRecord(): number {
 }
 
 window.addEventListener('keydown', (e) => {
+  // Som: navegadores só liberam áudio depois de um gesto; M liga/desliga.
+  sfx.unlock();
+  if (e.key === 'm' || e.key === 'M') sfx.toggleMute();
   // Tecla C na mira livre: recentralizar olhando o alvo do centro.
   if ((e.key === 'c' || e.key === 'C') && activeScene === 'calibration') scene.recenterOnCenter(screenW(), screenH());
   // Esc abandona a partida: missão volta ao mapa, Treino Livre volta ao menu.
@@ -206,6 +221,7 @@ window.addEventListener('keydown', (e) => {
 
 // Clique do mouse nas telas de menu.
 canvas.addEventListener('click', (e) => {
+  sfx.unlock();
   buttonScenes[activeScene]?.onClick(e.clientX, e.clientY, screenW(), screenH());
 });
 

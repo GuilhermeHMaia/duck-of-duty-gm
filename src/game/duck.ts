@@ -12,6 +12,12 @@ const GRAVITY = 1600;           // px/s²
 const SHY_TRIGGER_MS = 1000;
 const SHY_FLEE_MS = 1500;
 const SHY_FLEE_BOOST = 1.8;
+/** Pato Fantasma (Pântano): ciclo visível → some → invisível → aparece. */
+const GHOST_VISIBLE_MS = 2500;
+const GHOST_FADE_MS = 400;
+const GHOST_HIDDEN_MS = 1200;
+/** O pato grasna este tempo antes de fugir, avisando o jogador. */
+const QUACK_WARNING_MS = 900;
 
 /**
  * Um pato estilo Duck Hunt: nasce na linha da grama e voa quicando nas bordas. De tempos
@@ -39,6 +45,9 @@ export class Duck {
   private lightMs = 0;
   private fleeMs = 0;
   private boost = 1;
+  private ghostPhase = Math.random() * (GHOST_VISIBLE_MS + GHOST_HIDDEN_MS + 2 * GHOST_FADE_MS);
+  private quackPending = false;
+  private quacked = false;
 
   constructor(
     readonly id: string,
@@ -53,6 +62,8 @@ export class Duck {
     readonly armored = false,
     /** Tímido: foge da luz (Floresta Noturna). */
     readonly shy = false,
+    /** Fantasma: some e reaparece de tempos em tempos (Pântano). */
+    readonly ghost = false,
   ) {
     this.x = screenW * (0.15 + Math.random() * 0.7);
     this.y = groundY - RADIUS;
@@ -62,9 +73,32 @@ export class Duck {
     this.nextTurn = randomBetween(...turnIntervalMs);
   }
 
-  /** Pode ser mirado e atingido. */
+  /** Pode ser mirado e atingido (fantasma só enquanto está visível). */
   isTargetable(): boolean {
-    return this.state === 'flying' || this.state === 'escaping';
+    return (this.state === 'flying' || this.state === 'escaping') && this.opacity > 0.5;
+  }
+
+  /** Opacidade para desenhar: 1 normal; o fantasma some e reaparece em ciclo. */
+  get opacity(): number {
+    if (!this.ghost || this.state === 'falling') return 1;
+    const cycle = GHOST_VISIBLE_MS + GHOST_HIDDEN_MS + 2 * GHOST_FADE_MS;
+    const p = this.ghostPhase % cycle;
+    if (p < GHOST_VISIBLE_MS) return 1;
+    if (p < GHOST_VISIBLE_MS + GHOST_FADE_MS) return 1 - (p - GHOST_VISIBLE_MS) / GHOST_FADE_MS;
+    if (p < GHOST_VISIBLE_MS + GHOST_FADE_MS + GHOST_HIDDEN_MS) return 0;
+    return (p - GHOST_VISIBLE_MS - GHOST_FADE_MS - GHOST_HIDDEN_MS) / GHOST_FADE_MS;
+  }
+
+  /** true uma única vez, quando o pato grasna avisando que vai fugir. */
+  consumeQuack(): boolean {
+    if (!this.quackPending) return false;
+    this.quackPending = false;
+    return true;
+  }
+
+  /** Está no intervalo de aviso antes de fugir (para desenhar o balão "QUACK!"). */
+  get warning(): boolean {
+    return this.quacked && this.state === 'flying';
   }
 
   /** Direção visual: +1 voando para a direita, −1 para a esquerda. */
@@ -115,7 +149,12 @@ export class Duck {
   update(dtMs: number, screenW: number, groundY: number, escapeMs: number): void {
     const dt = dtMs / 1000;
     this.age += dtMs;
+    this.ghostPhase += dtMs;
     this.wing += dt * (this.state === 'falling' ? 0 : 18);
+    if (!this.quacked && this.state === 'flying' && this.age >= escapeMs - QUACK_WARNING_MS) {
+      this.quacked = true;
+      this.quackPending = true;
+    }
 
     switch (this.state) {
       case 'flying': {

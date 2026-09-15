@@ -1,5 +1,7 @@
 import { BLINK_TRIGGER_MS } from '../calibration/calibrationScene';
 import type { CareerStore } from '../career/careerStore';
+import { dailyChallenge, todayKey } from '../career/daily';
+import { sfx } from '../game/sound';
 import type { AimState, AimTarget } from '../game/aiming';
 import type { DebugConfig, FaceFrame } from '../types';
 
@@ -11,6 +13,8 @@ export interface Nav {
   arsenal(returnTo: () => void): void;
   startMission(missionId: string): void;
   startArcade(): void;
+  startDaily(): void;
+  achievements(): void;
   freeAim(): void;
   recalibrate(): void;
 }
@@ -137,21 +141,37 @@ export class MenuScene extends ButtonScene {
   }
 
   protected layout(w: number, h: number): UiButton[] {
+    const daily = dailyChallenge();
+    const best = this.career.dailyBest(todayKey());
     const items: Omit<UiButton, 'x' | 'y' | 'w' | 'h'>[] = [
       { id: 'career', label: 'Carreira', sub: 'Operações da Divisão Olho de Águia', primary: true, onSelect: () => this.nav.map() },
+      { id: 'daily', label: 'Desafio Diário', sub: `${daily.environmentName} · melhor hoje: ${Math.round(best)}`, primary: true, onSelect: () => this.nav.startDaily() },
       { id: 'arcade', label: 'Treino Livre', sub: '5 rodadas · recorde', onSelect: () => this.nav.startArcade() },
-      { id: 'arsenal', label: 'Arsenal', sub: 'Comprar e equipar armas', onSelect: () => this.nav.arsenal(() => this.nav.menu()) },
+      { id: 'arsenal', label: 'Arsenal', sub: 'Armas e melhorias', onSelect: () => this.nav.arsenal(() => this.nav.menu()) },
+      { id: 'achievements', label: 'Conquistas', sub: `${this.career.state.achievements.length} desbloqueadas`, onSelect: () => this.nav.achievements() },
       { id: 'free', label: 'Mira livre', sub: 'Testar e recentralizar a mira', onSelect: () => this.nav.freeAim() },
       { id: 'recalibrate', label: 'Recalibrar', sub: 'Refazer o Estande de Treino', onSelect: () => this.nav.recalibrate() },
     ];
-    return stackButtons(items, w, h, h * 0.33);
+    return gridButtons(items, w, h, h * 0.3);
   }
 
   protected drawContent(ctx: CanvasRenderingContext2D, _now: number, w: number, h: number): void {
     drawText(ctx, w / 2, h * 0.12, 'DUCK OF DUTY', 52, '#f8fafc');
     drawText(ctx, w / 2, h * 0.12 + 44, 'Divisão Olho de Águia', 20, '#94a3b8');
     drawText(ctx, w / 2, h * 0.12 + 80, `★ ${this.career.totalStars()}   ·   ${this.career.state.penas} penas`, 18, '#facc15');
+    if (!sfx.ready) drawText(ctx, w / 2, h - 40, 'Clique em qualquer lugar ou aperte uma tecla para ativar o som · M silencia', 13, '#94a3b8');
   }
+}
+
+/** Grade de 2 colunas centralizada (1 coluna em tela estreita). */
+export function gridButtons(items: Omit<UiButton, 'x' | 'y' | 'w' | 'h'>[], w: number, h: number, top: number): UiButton[] {
+  const cols = w >= 700 ? 2 : 1;
+  const gap = 14;
+  const rows = Math.ceil(items.length / cols);
+  const bw = Math.min(380, (w - 48 - gap * (cols - 1)) / cols);
+  const bh = Math.max(46, Math.min(70, (h - 60 - top - gap * (rows - 1)) / rows));
+  const x0 = w / 2 - (cols * bw + (cols - 1) * gap) / 2;
+  return items.map((it, i) => ({ ...it, x: x0 + (i % cols) * (bw + gap), y: top + Math.floor(i / cols) * (bh + gap), w: bw, h: bh }));
 }
 
 /** Empilha botões centralizados, encolhendo a altura se a tela for baixa. */
@@ -182,13 +202,21 @@ export function drawButton(ctx: CanvasRenderingContext2D, b: UiButton, hovered: 
   ctx.strokeStyle = hovered ? '#4ade80' : enabled ? 'rgba(148, 163, 184, 0.5)' : 'rgba(71, 85, 105, 0.5)';
   ctx.stroke();
   const color = enabled ? '#f8fafc' : '#64748b';
+  const labelSize = fitSize(ctx, b.label, b.w - 20, b.sub ? Math.min(22, b.h * 0.36) : Math.min(22, b.h * 0.45));
   if (b.sub) {
-    drawText(ctx, b.x + b.w / 2, b.y + b.h * 0.38, b.label, 22, color);
-    drawText(ctx, b.x + b.w / 2, b.y + b.h * 0.72, b.sub, 14, enabled ? '#cbd5e1' : '#64748b');
+    drawText(ctx, b.x + b.w / 2, b.y + b.h * 0.38, b.label, labelSize, color);
+    drawText(ctx, b.x + b.w / 2, b.y + b.h * 0.74, b.sub, fitSize(ctx, b.sub, b.w - 20, 14), enabled ? '#cbd5e1' : '#64748b');
   } else {
-    drawText(ctx, b.x + b.w / 2, b.y + b.h / 2, b.label, 22, color);
+    drawText(ctx, b.x + b.w / 2, b.y + b.h / 2, b.label, labelSize, color);
   }
   ctx.restore();
+}
+
+/** Maior tamanho de fonte (até `max`) em que o texto cabe em `maxWidth`. */
+export function fitSize(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, max: number): number {
+  ctx.font = `600 ${max}px system-ui, 'Segoe UI', sans-serif`;
+  const width = ctx.measureText(text).width;
+  return width <= maxWidth ? max : Math.max(10, Math.floor((max * maxWidth) / width));
 }
 
 export function drawText(ctx: CanvasRenderingContext2D, x: number, y: number, text: string, size: number, color: string, align: CanvasTextAlign = 'center'): void {

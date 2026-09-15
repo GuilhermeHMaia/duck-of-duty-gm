@@ -1,19 +1,28 @@
-export type EnvironmentId = 'lake' | 'forest';
+export type EnvironmentId = 'lake' | 'forest' | 'swamp';
 
 /** Floresta Noturna: raio do círculo de luz em volta da mira. */
 export const LIGHT_RADIUS = 180;
+/** Pântano da Neblina: raio da clareira que o olhar abre na neblina. */
+export const FOG_RADIUS = 230;
 const DARKNESS = 'rgba(2, 6, 15, 0.97)';
+const FOG = 'rgba(148, 168, 158, 0.93)';
 
-/** Só a Floresta tem escuridão; no Lago tudo está sempre visível. */
-export function isDark(env: EnvironmentId): boolean {
-  return env === 'forest';
+/** Até que distância da mira as coisas ficam visíveis (Infinity = tudo visível). */
+export function visibilityRadius(env: EnvironmentId): number {
+  return env === 'forest' ? LIGHT_RADIUS : env === 'swamp' ? FOG_RADIUS : Infinity;
 }
 
-/** Um ponto está iluminado (visível e mirável)? */
+/** O ambiente esconde o que está longe da mira? */
+export function isDark(env: EnvironmentId): boolean {
+  return visibilityRadius(env) !== Infinity;
+}
+
+/** Um ponto está visível (e mirável)? */
 export function isLit(env: EnvironmentId, x: number, y: number, light: { x: number; y: number } | null): boolean {
-  if (!isDark(env)) return true;
+  const radius = visibilityRadius(env);
+  if (radius === Infinity) return true;
   if (!light) return false;
-  return Math.hypot(x - light.x, y - light.y) <= LIGHT_RADIUS;
+  return Math.hypot(x - light.x, y - light.y) <= radius;
 }
 
 /** Céu e fundo, desenhados ANTES dos patos. */
@@ -24,7 +33,6 @@ export function drawEnvironmentBack(ctx: CanvasRenderingContext2D, env: Environm
     sky.addColorStop(1, '#0b1a2b');
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, w, h);
-    // lua
     ctx.fillStyle = '#e2e8f0';
     ctx.beginPath();
     ctx.arc(w * 0.82, h * 0.16, 34, 0, Math.PI * 2);
@@ -33,6 +41,13 @@ export function drawEnvironmentBack(ctx: CanvasRenderingContext2D, env: Environm
     ctx.beginPath();
     ctx.arc(w * 0.82 + 14, h * 0.16 - 8, 30, 0, Math.PI * 2);
     ctx.fill();
+    return;
+  }
+  if (env === 'swamp') {
+    sky.addColorStop(0, '#3f4f48');
+    sky.addColorStop(1, '#6b7f73');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, w, h);
     return;
   }
   sky.addColorStop(0, '#0f1b33');
@@ -44,7 +59,6 @@ export function drawEnvironmentBack(ctx: CanvasRenderingContext2D, env: Environm
 /** Chão e vegetação, desenhados DEPOIS dos patos (eles nascem "de trás" da grama). */
 export function drawEnvironmentFront(ctx: CanvasRenderingContext2D, env: EnvironmentId, w: number, h: number, groundY: number): void {
   if (env === 'forest') {
-    // pinheiros em silhueta
     ctx.fillStyle = '#030a07';
     for (let x = -20; x < w + 60; x += 70) {
       const treeH = 90 + ((x * 37) % 60);
@@ -56,6 +70,34 @@ export function drawEnvironmentFront(ctx: CanvasRenderingContext2D, env: Environ
     }
     ctx.fillStyle = '#06140c';
     ctx.fillRect(0, groundY, w, h - groundY);
+    return;
+  }
+  if (env === 'swamp') {
+    // árvores secas e juncos sobre a água parada
+    ctx.strokeStyle = '#1f2a24';
+    ctx.lineWidth = 6;
+    for (let x = 40; x < w; x += 190) {
+      const top = groundY - 120 - ((x * 13) % 50);
+      ctx.beginPath();
+      ctx.moveTo(x, groundY + 4);
+      ctx.lineTo(x + 6, top);
+      ctx.lineTo(x + 40, top - 30);
+      ctx.moveTo(x + 5, top + 40);
+      ctx.lineTo(x - 28, top + 10);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#2f4a45';
+    ctx.fillRect(0, groundY, w, h - groundY);
+    ctx.fillStyle = '#3d5c55';
+    for (let x = 0; x < w; x += 26) ctx.fillRect(x, groundY + 10 + ((x * 7) % 18), 14, 2);
+    ctx.strokeStyle = '#27403a';
+    ctx.lineWidth = 2;
+    for (let x = 8; x < w; x += 22) {
+      ctx.beginPath();
+      ctx.moveTo(x, groundY + 2);
+      ctx.lineTo(x + 3, groundY - 20 - ((x * 11) % 14));
+      ctx.stroke();
+    }
     return;
   }
   ctx.fillStyle = '#1f4d2b';
@@ -71,13 +113,16 @@ export function drawEnvironmentFront(ctx: CanvasRenderingContext2D, env: Environ
 }
 
 /**
- * Escuridão com um círculo de luz na mira: tudo fora dele fica quase preto.
- * A borda do círculo é suave (gradiente) para parecer uma lanterna.
+ * Cobre tudo que está longe da mira: escuridão com lanterna na Floresta, neblina com clareira
+ * no Pântano. A borda do círculo é suave (gradiente).
  */
 export function drawDarkness(ctx: CanvasRenderingContext2D, env: EnvironmentId, w: number, h: number, light: { x: number; y: number } | null): void {
   if (!isDark(env)) return;
+  const radius = visibilityRadius(env);
+  const cover = env === 'forest' ? DARKNESS : FOG;
+  const clear = env === 'forest' ? 'rgba(2, 6, 15, 0)' : 'rgba(148, 168, 158, 0)';
   ctx.save();
-  ctx.fillStyle = DARKNESS;
+  ctx.fillStyle = cover;
   if (!light) {
     ctx.fillRect(0, 0, w, h);
     ctx.restore();
@@ -85,23 +130,25 @@ export function drawDarkness(ctx: CanvasRenderingContext2D, env: EnvironmentId, 
   }
   ctx.beginPath();
   ctx.rect(0, 0, w, h);
-  ctx.arc(light.x, light.y, LIGHT_RADIUS, 0, Math.PI * 2, true);
+  ctx.arc(light.x, light.y, radius, 0, Math.PI * 2, true);
   ctx.fill('evenodd');
-  const edge = ctx.createRadialGradient(light.x, light.y, LIGHT_RADIUS * 0.55, light.x, light.y, LIGHT_RADIUS);
-  edge.addColorStop(0, 'rgba(2, 6, 15, 0)');
-  edge.addColorStop(1, DARKNESS);
+  const edge = ctx.createRadialGradient(light.x, light.y, radius * 0.55, light.x, light.y, radius);
+  edge.addColorStop(0, clear);
+  edge.addColorStop(1, cover);
   ctx.fillStyle = edge;
   ctx.beginPath();
-  ctx.arc(light.x, light.y, LIGHT_RADIUS, 0, Math.PI * 2);
+  ctx.arc(light.x, light.y, radius, 0, Math.PI * 2);
   ctx.fill();
-  // Brilho quente da lanterna: o céu noturno é tão escuro que, sem isso, não dá para ver onde a luz está.
-  const glow = ctx.createRadialGradient(light.x, light.y, 0, light.x, light.y, LIGHT_RADIUS);
-  glow.addColorStop(0, 'rgba(255, 236, 179, 0.22)');
-  glow.addColorStop(0.7, 'rgba(255, 236, 179, 0.08)');
-  glow.addColorStop(1, 'rgba(255, 236, 179, 0)');
-  ctx.fillStyle = glow;
-  ctx.beginPath();
-  ctx.arc(light.x, light.y, LIGHT_RADIUS, 0, Math.PI * 2);
-  ctx.fill();
+  if (env === 'forest') {
+    // Brilho quente da lanterna: o céu noturno é tão escuro que, sem isso, não dá para ver onde a luz está.
+    const glow = ctx.createRadialGradient(light.x, light.y, 0, light.x, light.y, radius);
+    glow.addColorStop(0, 'rgba(255, 236, 179, 0.22)');
+    glow.addColorStop(0.7, 'rgba(255, 236, 179, 0.08)');
+    glow.addColorStop(1, 'rgba(255, 236, 179, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(light.x, light.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 }

@@ -38,15 +38,15 @@ export class Score {
 
   /** Registra um pato abatido e devolve os pontos ganhos (multiplier: ex. 3 para o blindado). */
   hit(round: number, slot: number, multiplier = 1): number {
-    const points = Score.pointsPerDuck(round) * multiplier;
-    this.roundResults[slot] = 'hit';
+    const points = Math.round(Score.pointsPerDuck(round) * multiplier);
+    if (slot >= 0 && slot < this.roundResults.length) this.roundResults[slot] = 'hit';
     this.total += points;
     this.hitsTotal++;
     return points;
   }
 
   escaped(slot: number): void {
-    this.roundResults[slot] = 'miss';
+    if (slot >= 0 && slot < this.roundResults.length) this.roundResults[slot] = 'miss';
   }
 
   /** Fecha a rodada; devolve o bônus (0 se não foi perfeita). */

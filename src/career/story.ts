@@ -9,6 +9,11 @@ export const REGION_INTRO: Record<RegionId, readonly string[]> = {
     'A Legião Grasnante quer dominar todos os lagos do mundo. Começando pelo do seu avô.',
     'Aqui ninguém usa gatilho. Você mira com os OLHOS e atira piscando. Não me pergunte como.',
   ],
+  pantano: [
+    'Rastreamos a Legião até o Pântano da Neblina. Ninguém enxerga um palmo aqui.',
+    'Ninguém... menos você. Onde você olha, a névoa abre.',
+    'E cuidado com os fantasmas. Eles somem quando você menos espera.',
+  ],
   floresta: [
     'Notícia ruim, recruta: a Legião aprendeu a atacar de noite.',
     'Notícia boa: descobrimos que o seu olhar funciona como lanterna.',
@@ -49,11 +54,30 @@ export const BRIEFINGS: Record<string, readonly string[]> = {
     'Emboscada, recruta! Blindados, Tímidos e mais pato do que eu consigo contar.',
     'Se sobreviver a esta noite, conto um segredo sobre a Legião.',
   ],
+  'pantano-1': [
+    'Mova o olhar pela névoa. O pato que você não vê, você não acerta.',
+  ],
+  'pantano-2': [
+    'Os Fantasmas do Brejo somem e reaparecem. Atire quando eles estiverem sólidos.',
+  ],
+  'pantano-3': [
+    'Blindados atolados na lama e fantasmas por todo lado. Traga seu melhor rifle.',
+  ],
+  'pantano-4': [
+    'É ELE, recruta. O General Grasnado em pessoa.',
+    'O escudo dele é impenetrável... a não ser que você o encare nos olhos. Dois segundos, sem piscar.',
+    'Quando o escudo cair, descarregue tudo. Rifle dói em dobro.',
+  ],
 };
 
-/** Mostrado no resultado ao completar a última missão da Floresta pela primeira vez. */
-export const CAMPAIGN_HOOK: readonly string[] = [
-  'Muito bem, recruta. Interceptamos uma mensagem da Legião...',
-  'Eles têm uma BASE. E um general. Prepare-se.',
-  '(continua em breve)',
-];
+/** Mostrado no resultado ao completar pela primeira vez a missão indicada. */
+export const COMPLETION_HOOKS: Record<string, readonly string[]> = {
+  'floresta-4': [
+    'Muito bem, recruta. Interceptamos uma mensagem da Legião...',
+    'Eles têm um general. E ele está escondido no pântano.',
+  ],
+  'pantano-4': [
+    'O General caiu! Mas antes fugiu grasnando para a Base da Legião...',
+    '(continua em breve)',
+  ],
+};
