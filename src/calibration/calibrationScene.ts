@@ -235,7 +235,7 @@ export class CalibrationScene {
           const t = gridTarget(i, screenW, screenH);
           drawTarget(ctx, t.x, t.y, TARGET_RADIUS, 1, aim?.snappedTargetId === t.id);
         }
-        drawText(ctx, screenW / 2, 40, 'Mira livre · feche os dois olhos por um instante para jogar', 18, '#94a3b8');
+        drawText(ctx, screenW / 2, 40, 'Mira livre · feche os dois olhos por um instante para ir ao menu', 18, '#94a3b8');
         drawText(ctx, screenW / 2, 66, 'Mira desviada? Olhe o alvo do centro e levante as sobrancelhas por 1 s (ou tecla C)', 15, '#64748b');
         if (this.recenterMessage && now - this.recenterMessage.at < RECENTER_FLASH_MS) {
           drawText(ctx, screenW / 2, screenH / 2 - 90, this.recenterMessage.text, 24, '#4ade80');

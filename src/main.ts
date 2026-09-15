@@ -3,7 +3,15 @@ import { CalibrationScene } from './calibration/calibrationScene';
 import { CalibrationStore } from './calibration/calibrationStore';
 import { DebugPanel } from './debug/debugPanel';
 import { Aiming, type AimState } from './game/aiming';
-import { DuckGame } from './game/duckGame';
+import { CareerStore } from './career/careerStore';
+import { evaluateMission, missionById, missionsOf, regionById } from './career/missions';
+import { ARCADE_ROUNDS, DuckGame, type GameSetup, type GameStats } from './game/duckGame';
+import { weaponById } from './game/weapons';
+import { ArsenalScene } from './scenes/arsenalScene';
+import { BriefingScene } from './scenes/briefingScene';
+import { MapScene } from './scenes/mapScene';
+import { MenuScene, type ButtonScene, type Nav } from './scenes/menuScene';
+import { ResultScene } from './scenes/resultScene';
 import { FaceTracker } from './tracking/faceTracker';
 import { FrameBuffer } from './tracking/frameBuffer';
 import type { DebugConfig, FaceFrame } from './types';
@@ -73,31 +81,126 @@ const buffer = new FrameBuffer();
 const store = new CalibrationStore(config);
 store.load(screenW(), screenH());
 const aiming = new Aiming(config, store);
-/** Cena ativa: o Estande / mira livre (calibração) ou o jogo. */
-let activeScene: 'calibration' | 'game' = 'calibration';
-const game = new DuckGame(config);
+const career = new CareerStore();
+career.load();
+
+// ---------- Cenas e navegação ----------
+
+type SceneId = 'calibration' | 'menu' | 'map' | 'briefing' | 'arsenal' | 'result' | 'game';
+/** Cena ativa: calibração (Estande / mira livre), telas de menu ou a partida. */
+let activeScene: SceneId = 'calibration';
+
+const game = new DuckGame(config, (stats, setup) => onGameFinished(stats, setup));
 
 const panel = new DebugPanel(config, video, {
-  onRecalibrate: () => {
-    statusEl.textContent = '';
-    activeScene = 'calibration';
-    scene.start();
-  },
+  onRecalibrate: () => nav.recalibrate(),
   onClearCalibration: () => store.clear(),
 }, DEFAULT_CONFIG);
+
+const nav: Nav = {
+  menu: () => goto('menu'),
+  map: () => goto('map'),
+  briefing: (missionId) => {
+    briefingScene.show(missionId);
+    goto('briefing');
+  },
+  arsenal: (returnTo) => {
+    arsenalScene.show(returnTo);
+    goto('arsenal');
+  },
+  startMission: (missionId) => {
+    const mission = missionById(missionId);
+    if (!mission) return;
+    const region = regionById(mission.region);
+    const first = mission.objectives[0];
+    game.start({
+      mode: 'mission',
+      title: `${region.name} · Missão ${mission.index + 1}`,
+      rounds: [mission.round],
+      environment: region.environment,
+      weapon: weaponById(career.state.equipped),
+      tutorial: mission.tutorial,
+      goalHits: first.kind === 'hits' ? first.value : undefined,
+      missionId: mission.id,
+    });
+    goto('game');
+  },
+  startArcade: () => {
+    game.start({ mode: 'arcade', title: 'Treino Livre', rounds: ARCADE_ROUNDS, environment: 'lake', weapon: weaponById(career.state.equipped) });
+    goto('game');
+  },
+  freeAim: () => {
+    scene.showFreeAim();
+    goto('calibration');
+  },
+  recalibrate: () => {
+    statusEl.textContent = '';
+    goto('calibration');
+    scene.start();
+  },
+};
+
 const scene = new CalibrationScene(store, buffer, {
   setPanelCollapsed: (collapsed) => panel.setCollapsed(collapsed),
-  startGame: () => {
-    activeScene = 'game';
-    panel.setCollapsed(true);
-    game.start();
-  },
+  startGame: () => nav.menu(),
   recenter: (x, y) => aiming.recenter(x, y),
 });
+const menuScene = new MenuScene(config, career, nav);
+const mapScene = new MapScene(config, career, nav);
+const briefingScene = new BriefingScene(config, career, nav);
+const arsenalScene = new ArsenalScene(config, career);
+const resultScene = new ResultScene(config, nav);
+const buttonScenes: Partial<Record<SceneId, ButtonScene>> = {
+  menu: menuScene,
+  map: mapScene,
+  briefing: briefingScene,
+  arsenal: arsenalScene,
+  result: resultScene,
+};
 
-// Tecla C na mira livre: recentralizar olhando o alvo do centro.
+function goto(id: SceneId): void {
+  if (activeScene === 'game' && id !== 'game') game.stop();
+  activeScene = id;
+  if (id !== 'calibration') panel.setCollapsed(true);
+  buttonScenes[id]?.enter();
+}
+
+function onGameFinished(stats: GameStats, setup: GameSetup): void {
+  if (setup.mode === 'arcade') {
+    resultScene.show({ kind: 'arcade', stats, record: Math.max(stats.score, arcadeRecord()) });
+  } else {
+    const mission = missionById(setup.missionId ?? '')!;
+    const lastOfRegion = missionsOf(mission.region).at(-1)!.id === mission.id;
+    const wasCompleted = career.starsOf(mission.id) > 0;
+    const achieved = evaluateMission(mission, stats);
+    const reward = career.recordResult(mission, achieved, stats.hits);
+    const showHook = mission.region === 'floresta' && lastOfRegion && !wasCompleted && achieved[0];
+    resultScene.show({ kind: 'mission', mission, stats, achieved, reward, showHook });
+  }
+  goto('result');
+}
+
+function arcadeRecord(): number {
+  try {
+    return Number(localStorage.getItem('duck-of-duty.record.v1')) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 window.addEventListener('keydown', (e) => {
+  // Tecla C na mira livre: recentralizar olhando o alvo do centro.
   if ((e.key === 'c' || e.key === 'C') && activeScene === 'calibration') scene.recenterOnCenter(screenW(), screenH());
+  // Esc abandona a partida: missão volta ao mapa, Treino Livre volta ao menu.
+  if (e.key === 'Escape' && activeScene === 'game') {
+    if (game.getSetup()?.mode === 'mission') nav.map();
+    else nav.menu();
+  }
+});
+
+// Clique do mouse nas telas de menu.
+canvas.addEventListener('click', (e) => {
+  buttonScenes[activeScene]?.onClick(e.clientX, e.clientY, screenW(), screenH());
 });
 
 const trackingFps = new FpsCounter();
@@ -145,16 +248,23 @@ function onVideoFrame(now: number): void {
     pushTrail(trails.filtered, frame.gazeFiltered);
     pushTrail(trails.delayed, buffer.getFrameAgo(config.preBlinkBufferMs)?.gazeFiltered ?? null);
 
-    const targets = activeScene === 'game' ? game.getTargets() : scene.getTargets(screenW(), screenH());
-    const aim = aiming.update(frame, screenW(), screenH(), targets);
+    const aim = aiming.update(frame, screenW(), screenH(), currentTargets());
+    const buttons = buttonScenes[activeScene];
     if (activeScene === 'game') game.onFrame(frame, aim);
-    else scene.onFrame(frame, screenW(), screenH());
+    else if (activeScene === 'calibration') scene.onFrame(frame, screenW(), screenH());
+    else buttons?.onFrame(frame, aim, screenW(), screenH());
 
     trackingFps.tick(performance.now());
   } catch (err) {
     console.error('Erro no tracking', err);
   }
   scheduleNextFrame();
+}
+
+function currentTargets() {
+  if (activeScene === 'game') return game.getTargets();
+  if (activeScene === 'calibration') return scene.getTargets(screenW(), screenH());
+  return [];
 }
 
 // ---------- Loop de render (tudo em px CSS) ----------
@@ -245,12 +355,12 @@ function render(now: number): void {
 
   let aim = aiming.getState();
   if (aim?.snappedTargetId) {
-    const liveTargets = activeScene === 'game' ? game.getTargets() : scene.getTargets(screenW(), screenH());
-    const live = liveTargets.find((tg) => tg.id === aim!.snappedTargetId);
+    const live = currentTargets().find((tg) => tg.id === aim!.snappedTargetId);
     if (live) aim = { ...aim, cursor: { x: live.x, y: live.y } };
   }
   if (activeScene === 'game') game.render(ctx, now, screenW(), screenH(), aim);
-  else scene.render(ctx, now, screenW(), screenH(), aim);
+  else if (activeScene === 'calibration') scene.render(ctx, now, screenW(), screenH(), aim);
+  else buttonScenes[activeScene]?.render(ctx, now, screenW(), screenH());
 
   if (!panel.isCollapsed()) {
     drawTrail(trails.delayed, '250, 204, 21'); // amarelo — gaze de preBlinkBufferMs atrás
@@ -258,7 +368,7 @@ function render(now: number): void {
     drawTrail(trails.filtered, '59, 130, 246'); // azul — gaze filtrado (1€)
     if (aim) drawContributions(aim);
   }
-  if (aim && (activeScene === 'game' || !scene.hidesCursor())) drawCursor(aim);
+  if (aim && (activeScene !== 'calibration' || !scene.hidesCursor())) drawCursor(aim);
 
   panel.render(now, latestFrame, tracker.getLandmarks(), trackingFps.value(now), rafFps.value(now), {
     status: store.status,
@@ -330,7 +440,7 @@ async function start(): Promise<void> {
     await tracker.init();
 
     statusEl.textContent = store.invalidatedReason ?? '';
-    if (store.model) scene.showFreeAim();
+    if (store.model) nav.menu();
     else scene.start();
     scheduleNextFrame();
     scheduleFpsCheck(0);

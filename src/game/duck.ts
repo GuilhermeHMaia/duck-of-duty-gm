@@ -8,6 +8,10 @@ const TURN_RATE_RAD_PER_S = Math.PI * 0.75; // 135°/s
 const ESCAPE_SPEED_FACTOR = 1.4;
 const HIT_FREEZE_MS = 220;      // o pato "trava" no ar antes de cair, como no Duck Hunt
 const GRAVITY = 1600;           // px/s²
+/** Pato Tímido: depois deste tempo na luz, foge dela por SHY_FLEE_MS, mais rápido. */
+const SHY_TRIGGER_MS = 1000;
+const SHY_FLEE_MS = 1500;
+const SHY_FLEE_BOOST = 1.8;
 
 /**
  * Um pato estilo Duck Hunt: nasce na linha da grama e voa quicando nas bordas. De tempos
@@ -32,6 +36,9 @@ export class Duck {
   private nextTurn: number;
   private hitAge = 0;
   private wing = Math.random() * Math.PI * 2;
+  private lightMs = 0;
+  private fleeMs = 0;
+  private boost = 1;
 
   constructor(
     readonly id: string,
@@ -44,6 +51,8 @@ export class Duck {
     private readonly turnIntervalMs: readonly [number, number],
     /** Blindado: tiro normal ricocheteia; só o super derruba. */
     readonly armored = false,
+    /** Tímido: foge da luz (Floresta Noturna). */
+    readonly shy = false,
   ) {
     this.x = screenW * (0.15 + Math.random() * 0.7);
     this.y = groundY - RADIUS;
@@ -65,6 +74,34 @@ export class Duck {
 
   get wingPhase(): number {
     return this.wing;
+  }
+
+  /** Pato Tímido: acumula tempo na luz e, passado SHY_TRIGGER_MS, dispara para longe dela. */
+  updateLight(dtMs: number, lit: boolean, light: { x: number; y: number } | null): void {
+    if (!this.shy || this.state !== 'flying') return;
+    if (this.fleeMs > 0) {
+      this.fleeMs -= dtMs;
+      if (this.fleeMs <= 0) this.boost = 1;
+      return;
+    }
+    if (!lit || !light) {
+      this.lightMs = Math.max(0, this.lightMs - dtMs);
+      return;
+    }
+    this.lightMs += dtMs;
+    if (this.lightMs < SHY_TRIGGER_MS) return;
+    // Direção para longe da luz (ângulo com y para cima).
+    const away = Math.atan2(-(this.y - light.y), this.x - light.x);
+    this.heading = away;
+    this.desiredHeading = away;
+    this.boost = SHY_FLEE_BOOST;
+    this.fleeMs = SHY_FLEE_MS;
+    this.lightMs = 0;
+    this.applyHeading();
+  }
+
+  get fleeing(): boolean {
+    return this.fleeMs > 0;
   }
 
   hit(): void {
@@ -147,8 +184,8 @@ export class Duck {
 
   private applyHeading(): void {
     // Ângulo medido com y para cima: 0 = direita, π/2 = cima. Na tela, y cresce para baixo.
-    this.vx = Math.cos(this.heading) * this.speed;
-    this.vy = -Math.sin(this.heading) * this.speed;
+    this.vx = Math.cos(this.heading) * this.speed * this.boost;
+    this.vy = -Math.sin(this.heading) * this.speed * this.boost;
   }
 }
 

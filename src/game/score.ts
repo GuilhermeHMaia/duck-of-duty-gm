@@ -32,8 +32,8 @@ export class Score {
     this.hitsTotal = 0;
   }
 
-  startRound(): void {
-    this.roundResults = new Array(DUCKS_PER_ROUND).fill(null);
+  startRound(duckCount = DUCKS_PER_ROUND): void {
+    this.roundResults = new Array(duckCount).fill(null);
   }
 
   /** Registra um pato abatido e devolve os pontos ganhos (multiplier: ex. 3 para o blindado). */

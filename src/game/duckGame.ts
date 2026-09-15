@@ -2,31 +2,72 @@ import { BLINK_TRIGGER_MS } from '../calibration/calibrationScene';
 import type { DebugConfig, FaceFrame } from '../types';
 import type { AimState, AimTarget } from './aiming';
 import { Duck } from './duck';
+import { drawDarkness, drawEnvironmentBack, drawEnvironmentFront, isDark, isLit, type EnvironmentId } from './environments';
 import { FocusMeter } from './focusMeter';
-import { DUCKS_PER_ROUND, ROUNDS, Score } from './score';
+import { DUCKS_PER_ROUND, Score } from './score';
+import type { WeaponDef } from './weapons';
 
 const DUCKS_PER_WAVE = 2;
 const ROUND_INTRO_MS = 1600;
 const ROUND_END_MS = 2200;
 
 /**
- * Curva de dificuldade por rodada (índice 0 = rodada 1). Multiplica os sliders duckSpeed e
- * duckEscapeMs. Rodada 1 é aprendizado; o salto maior fica para as duas últimas.
- *   speed:    velocidade do voo
- *   escape:   tempo até o pato fugir
- *   turn:     intervalo [mín, máx] ms entre mudanças de direção (menor = mais imprevisível)
- *   armored:  quantos dos 10 patos da rodada são blindados
+ * Uma rodada: quantos patos e como voam. speed e escape multiplicam os sliders duckSpeed e
+ * duckEscapeMs; turn é o intervalo [mín, máx] ms entre mudanças de direção.
  */
-const ROUND_TABLE = [
-  { speed: 1.0, escape: 1.0, turn: [2400, 3400], armored: 0 },
-  { speed: 1.2, escape: 0.95, turn: [2000, 3000], armored: 1 },
-  { speed: 1.4, escape: 0.88, turn: [1600, 2500], armored: 1 },
-  { speed: 1.7, escape: 0.8, turn: [1200, 2000], armored: 2 },
-  { speed: 2.0, escape: 0.72, turn: [900, 1500], armored: 2 },
-] as const;
+export interface RoundSpec {
+  ducks: number;
+  speed: number;
+  escape: number;
+  turn: readonly [number, number];
+  armored: number;
+  shy: number;
+}
 
-/** Munição: pente de 3; levantar as sobrancelhas recarrega. Cada rodada começa cheia. */
-const AMMO_CAPACITY = 3;
+/**
+ * Treino Livre: curva de dificuldade das 5 rodadas. Rodada 1 é aprendizado; o salto maior
+ * fica para as duas últimas.
+ */
+export const ARCADE_ROUNDS: readonly RoundSpec[] = [
+  { ducks: 10, speed: 1.0, escape: 1.0, turn: [2400, 3400], armored: 0, shy: 0 },
+  { ducks: 10, speed: 1.2, escape: 0.95, turn: [2000, 3000], armored: 1, shy: 0 },
+  { ducks: 10, speed: 1.4, escape: 0.88, turn: [1600, 2500], armored: 1, shy: 0 },
+  { ducks: 10, speed: 1.7, escape: 0.8, turn: [1200, 2000], armored: 2, shy: 0 },
+  { ducks: 10, speed: 2.0, escape: 0.72, turn: [900, 1500], armored: 2, shy: 0 },
+];
+
+export interface GameSetup {
+  mode: 'arcade' | 'mission';
+  /** Texto do HUD, ex.: "Lago do Vovô · Missão 2". */
+  title: string;
+  rounds: readonly RoundSpec[];
+  environment: EnvironmentId;
+  weapon: WeaponDef;
+  /** Missão tutorial: mostra dicas passo a passo. */
+  tutorial?: boolean;
+  /** Meta de patos do objetivo principal, para o HUD. */
+  goalHits?: number;
+  /** Missão da carreira sendo jogada (mode 'mission'). */
+  missionId?: string;
+}
+
+/** O que aconteceu na partida — base para estrelas, penas e recorde. */
+export interface GameStats {
+  ducks: number;
+  hits: number;
+  escaped: number;
+  /** Cartuchos disparados (o super não conta). */
+  shots: number;
+  /** Cartuchos que derrubaram pelo menos um pato. */
+  shotsHit: number;
+  supers: number;
+  armoredKills: number;
+  shyKills: number;
+  score: number;
+  newRecord: boolean;
+}
+
+/** Munição: levantar as sobrancelhas recarrega. Cada rodada começa com o pente cheio. */
 const BROW_UP_THRESHOLD = 0.5;
 const BROW_RELOAD_HOLD_MS = 250;
 /** Super: boca aberta (jawOpen) carrega; ~SUPER_CHARGE_MS de boca aberta acumulada enche a barra. */
@@ -39,7 +80,7 @@ const AIM_HISTORY_MS = 1500;
 const FLASH_MS = 700;
 const MAX_FRAME_DT_MS = 100;      // evita "teletransporte" depois de uma aba em segundo plano
 
-type Phase = 'roundIntro' | 'wave' | 'roundEnd' | 'gameOver';
+type Phase = 'idle' | 'roundIntro' | 'wave' | 'roundEnd' | 'done';
 
 interface AimSnapshot {
   t: number;
@@ -57,21 +98,21 @@ interface Flash {
 }
 
 /**
- * O jogo: 5 rodadas de 10 patos, que saem em duplas, voam e fogem pelo topo.
+ * A partida: rodadas de patos que saem em duplas, voam e fogem pelo topo. Serve tanto ao
+ * Treino Livre (5 rodadas, recorde) quanto às missões da carreira (1 rodada com objetivos).
  *
- * Munição: pente de 3 tiros; levantar as sobrancelhas recarrega (cada rodada começa cheia).
- * Super "Rajada": boca aberta enche a barra; com ela cheia, a próxima piscada derruba todos os
- * patos da tela, inclusive os blindados — que não caem com tiro normal.
- *
- * Tiro = piscada deliberada (dois olhos fechados por ≥ BLINK_TRIGGER_MS). A posição do
- * tiro é a da mira preBlinkBufferMs ANTES de os olhos começarem a fechar, lida do
- * histórico — fechar os olhos não desvia o tiro. O tiro só derruba se o foco naquele
- * instante for ≥ focusToShoot, e consome o foco todo.
+ * Tiro = piscada deliberada (dois olhos fechados por ≥ BLINK_TRIGGER_MS). A posição do tiro é
+ * a da mira preBlinkBufferMs ANTES de os olhos começarem a fechar. O tiro só derruba se o foco
+ * naquele instante for ≥ o da arma, e consome o foco todo.
+ * Munição: levantar as sobrancelhas recarrega. Super "Rajada": boca aberta enche a barra; cheia,
+ * a próxima piscada derruba todos os patos da tela, inclusive os blindados.
+ * Floresta: só dá para ver e mirar patos dentro do círculo de luz da mira; os Tímidos fogem dela.
  */
 export class DuckGame {
-  private phase: Phase = 'gameOver';
+  private setup: GameSetup | null = null;
+  private phase: Phase = 'idle';
   private phaseStart = 0;
-  private round = 1;
+  private roundIndex = 0;
   private released = 0;
   private ducks: Duck[] = [];
   private readonly focus = new FocusMeter();
@@ -81,34 +122,54 @@ export class DuckGame {
   private lastFrameT: number | null = null;
   private lastRenderT: number | null = null;
   private paused = false;
-  private newRecord = false;
   private lastBonus = 0;
   private closedSince: number | null = null;
   private closureHandled = false;
   private duckSeq = 0;
-  private ammo = AMMO_CAPACITY;
+  private ammo = 0;
   private browUpSince: number | null = null;
   private browHandled = false;
-  /** Carga do super, 0–1. Fica cheia até ser usada (atravessa rodadas). */
+  /** Carga do super, 0–1. Fica cheia até ser usada. */
   private superCharge = 0;
   private superFlashAt = -Infinity;
-  /** Slots (0–9) blindados na rodada atual. */
   private armoredSlots = new Set<number>();
+  private shySlots = new Set<number>();
+  /** Centro do círculo de luz (a mira antes do snap, do último frame). */
+  private light: { x: number; y: number } | null = null;
+  private stats: GameStats = emptyStats();
 
-  constructor(private readonly config: DebugConfig) {}
+  constructor(
+    private readonly config: DebugConfig,
+    private readonly onFinish: (stats: GameStats, setup: GameSetup) => void,
+  ) {}
 
-  start(): void {
+  start(setup: GameSetup): void {
+    this.setup = setup;
     this.score.startGame();
-    this.round = 1;
-    this.newRecord = false;
+    this.roundIndex = 0;
     this.flashes = [];
     this.superCharge = 0;
+    this.stats = emptyStats();
+    this.light = null;
     this.closureHandled = true; // uma piscada já em curso (a que iniciou o jogo) não atira
     this.beginRound(performance.now());
   }
 
+  /** Sai da partida sem registrar resultado (ex.: tecla Esc). */
+  stop(): void {
+    this.phase = 'idle';
+    this.ducks = [];
+  }
+
+  getSetup(): GameSetup | null {
+    return this.setup;
+  }
+
   getTargets(): AimTarget[] {
-    return this.ducks.filter((d) => d.isTargetable()).map((d) => ({ id: d.id, x: d.x, y: d.y }));
+    const env = this.setup?.environment ?? 'lake';
+    return this.ducks
+      .filter((d) => d.isTargetable() && isLit(env, d.x, d.y, this.light))
+      .map((d) => ({ id: d.id, x: d.x, y: d.y }));
   }
 
   /** Chamado a cada frame de tracking, depois de aiming.update. */
@@ -117,10 +178,11 @@ export class DuckGame {
     const dt = this.lastFrameT === null ? 0 : Math.min(t - this.lastFrameT, MAX_FRAME_DT_MS);
     this.lastFrameT = t;
     this.paused = !frame.faceDetected;
-    if (this.paused) return;
+    if (this.paused || !this.setup || this.phase === 'idle' || this.phase === 'done') return;
+    if (aim) this.light = { ...aim.unsnapped };
 
-    // Foco: enche com a mira grudada num pato vivo.
-    const snappedDuck = aim?.snappedTargetId && this.ducks.some((d) => d.id === aim.snappedTargetId && d.isTargetable())
+    // Foco: enche com a mira grudada num pato vivo (e visível).
+    const snappedDuck = aim?.snappedTargetId && this.getTargets().some((d) => d.id === aim.snappedTargetId)
       ? aim.snappedTargetId
       : null;
     if (this.phase === 'wave') {
@@ -142,7 +204,7 @@ export class DuckGame {
       }
       if (!this.closureHandled && t - this.closedSince >= BLINK_TRIGGER_MS) {
         this.closureHandled = true;
-        this.onDeliberateBlink(this.closedSince);
+        this.shoot(this.closedSince);
       }
     } else {
       this.closedSince = null;
@@ -153,12 +215,15 @@ export class DuckGame {
   render(ctx: CanvasRenderingContext2D, now: number, screenW: number, screenH: number, aim: AimState | null): void {
     const dt = this.lastRenderT === null ? 0 : Math.min(now - this.lastRenderT, MAX_FRAME_DT_MS);
     this.lastRenderT = now;
+    const setup = this.setup;
+    const env = setup?.environment ?? 'lake';
     const groundY = screenH * GROUND_FRACTION;
-    if (!this.paused) this.advance(dt, now, screenW, groundY);
+    if (!this.paused && setup) this.advance(dt, now, screenW, groundY);
 
-    drawBackground(ctx, screenW, screenH, groundY);
+    drawEnvironmentBack(ctx, env, screenW, screenH, groundY);
     for (const d of this.ducks) drawDuck(ctx, d);
-    drawGrass(ctx, screenW, screenH, groundY);
+    drawEnvironmentFront(ctx, env, screenW, screenH, groundY);
+    drawDarkness(ctx, env, screenW, screenH, isDark(env) ? (aim?.unsnapped ?? this.light) : null);
     this.drawFlashes(ctx, now);
     if (now - this.superFlashAt < 400) {
       ctx.save();
@@ -167,29 +232,31 @@ export class DuckGame {
       ctx.fillRect(0, 0, screenW, screenH);
       ctx.restore();
     }
-    if (aim && this.phase === 'wave') drawFocusRing(ctx, aim.cursor.x, aim.cursor.y, this.focus.value, this.focus.value >= this.config.focusToShoot);
-    this.drawHud(ctx, screenW, screenH, groundY);
+    if (!setup) return;
+    const needFocus = setup.weapon.focusToShoot(this.config);
+    if (aim && this.phase === 'wave') drawFocusRing(ctx, aim.cursor.x, aim.cursor.y, this.focus.value, this.focus.value >= needFocus);
+    this.drawHud(ctx, screenW, screenH, groundY, needFocus);
+    if (setup.tutorial && this.phase === 'wave') this.drawTutorialHint(ctx, screenW, needFocus);
 
     const cx = screenW / 2;
     const cy = screenH * 0.42;
     switch (this.phase) {
       case 'roundIntro':
-        drawText(ctx, cx, cy, `Rodada ${this.round}`, 48, '#f8fafc');
-        drawText(ctx, cx, cy + 44, `${Score.pointsPerDuck(this.round)} pontos por pato`, 20, '#cbd5e1');
+        if (setup.mode === 'arcade') {
+          drawText(ctx, cx, cy, `Rodada ${this.roundIndex + 1}`, 48, '#f8fafc');
+          drawText(ctx, cx, cy + 44, `${Score.pointsPerDuck(this.roundIndex + 1)} pontos por pato`, 20, '#cbd5e1');
+        } else {
+          drawText(ctx, cx, cy, setup.title, 40, '#f8fafc');
+          if (setup.goalHits) drawText(ctx, cx, cy + 44, `Objetivo: derrube ${setup.goalHits} patos`, 22, '#cbd5e1');
+        }
         break;
       case 'roundEnd': {
         const hits = this.score.roundResults.filter((r) => r === 'hit').length;
-        drawText(ctx, cx, cy, `${hits} de ${DUCKS_PER_ROUND} patos`, 44, '#f8fafc');
+        drawText(ctx, cx, cy, `${hits} de ${this.score.roundResults.length} patos`, 44, '#f8fafc');
         if (this.lastBonus > 0) drawText(ctx, cx, cy + 44, `Rodada perfeita! +${this.lastBonus}`, 22, '#facc15');
         break;
       }
-      case 'gameOver':
-        drawText(ctx, cx, cy - 40, 'Fim de jogo', 48, '#f8fafc');
-        drawText(ctx, cx, cy + 10, `${this.score.total} pontos · ${this.score.hitsTotal}/${ROUNDS * DUCKS_PER_ROUND} patos`, 24, '#cbd5e1');
-        drawText(ctx, cx, cy + 48, this.newRecord ? 'Novo recorde!' : `Recorde: ${this.score.record}`, 22, this.newRecord ? '#facc15' : '#94a3b8');
-        drawText(ctx, cx, cy + 92, 'Feche os dois olhos por um instante para jogar de novo', 18, '#94a3b8');
-        break;
-      case 'wave':
+      default:
         break;
     }
     if (this.paused) drawText(ctx, cx, screenH * 0.2, 'Rosto não detectado — jogo pausado', 22, '#fca5a5');
@@ -197,24 +264,37 @@ export class DuckGame {
 
   // ---------- Fluxo ----------
 
+  private currentRound(): RoundSpec {
+    const rounds = this.setup!.rounds;
+    return rounds[Math.min(this.roundIndex, rounds.length - 1)];
+  }
+
   private beginRound(now: number): void {
-    this.score.startRound();
+    const round = this.currentRound();
+    this.score.startRound(round.ducks);
     this.released = 0;
     this.ducks = [];
     this.focus.reset();
-    this.ammo = AMMO_CAPACITY;
-    // Sorteia quais patos da rodada são blindados (nunca o primeiro, para dar tempo de carregar o super).
-    const slots = Array.from({ length: DUCKS_PER_ROUND - 1 }, (_, i) => i + 1).sort(() => Math.random() - 0.5);
-    this.armoredSlots = new Set(slots.slice(0, this.roundInfo().armored));
+    this.ammo = this.setup!.weapon.ammo;
+    // Sorteia quais patos da rodada são blindados e tímidos (nunca o primeiro, para dar tempo de aprender).
+    const slots = Array.from({ length: round.ducks - 1 }, (_, i) => i + 1).sort(() => Math.random() - 0.5);
+    this.armoredSlots = new Set(slots.slice(0, round.armored));
+    this.shySlots = new Set(slots.slice(round.armored, round.armored + round.shy));
     this.phase = 'roundIntro';
     this.phaseStart = now;
   }
 
   private advance(dt: number, now: number, screenW: number, groundY: number): void {
+    const env = this.setup!.environment;
+    const round = this.currentRound();
     for (const d of this.ducks) {
       const wasGone = d.state === 'gone';
-      d.update(dt, screenW, groundY, this.config.duckEscapeMs * this.roundInfo().escape);
-      if (!wasGone && d.state === 'gone' && d.escaped) this.score.escaped(d.slot);
+      d.updateLight(dt, isLit(env, d.x, d.y, this.light), this.light);
+      d.update(dt, screenW, groundY, this.config.duckEscapeMs * round.escape);
+      if (!wasGone && d.state === 'gone' && d.escaped) {
+        this.score.escaped(d.slot);
+        this.stats.escaped++;
+      }
     }
 
     switch (this.phase) {
@@ -226,10 +306,10 @@ export class DuckGame {
         break;
       case 'wave':
         if (this.ducks.every((d) => d.state === 'gone')) {
-          if (this.released < DUCKS_PER_ROUND) {
+          if (this.released < round.ducks) {
             this.releaseWave(screenW, groundY);
           } else {
-            this.lastBonus = this.score.endRound();
+            this.lastBonus = this.setup!.mode === 'arcade' ? this.score.endRound() : 0;
             this.phase = 'roundEnd';
             this.phaseStart = now;
           }
@@ -237,34 +317,40 @@ export class DuckGame {
         break;
       case 'roundEnd':
         if (now - this.phaseStart >= ROUND_END_MS) {
-          if (this.round < ROUNDS) {
-            this.round++;
+          if (this.roundIndex < this.setup!.rounds.length - 1) {
+            this.roundIndex++;
             this.beginRound(now);
           } else {
-            this.newRecord = this.score.endGame();
-            this.ducks = [];
-            this.phase = 'gameOver';
+            this.finish();
           }
         }
         break;
-      case 'gameOver':
+      default:
         break;
     }
   }
 
-  private roundInfo() {
-    return ROUND_TABLE[Math.min(this.round, ROUND_TABLE.length) - 1];
+  private finish(): void {
+    const setup = this.setup!;
+    this.stats.score = this.score.total;
+    this.stats.newRecord = setup.mode === 'arcade' ? this.score.endGame() : false;
+    this.ducks = [];
+    this.phase = 'done';
+    this.onFinish({ ...this.stats }, setup);
   }
 
   private releaseWave(screenW: number, groundY: number): void {
-    const info = this.roundInfo();
-    const speed = this.config.duckSpeed * info.speed;
-    const count = Math.min(DUCKS_PER_WAVE, DUCKS_PER_ROUND - this.released);
+    const round = this.currentRound();
+    const speed = this.config.duckSpeed * round.speed;
+    const count = Math.min(DUCKS_PER_WAVE, round.ducks - this.released);
     this.ducks = [];
     for (let i = 0; i < count; i++) {
       const slot = this.released;
-      this.ducks.push(new Duck(`duck-${this.duckSeq++}`, slot, screenW, groundY, speed, info.turn, this.armoredSlots.has(slot)));
+      this.ducks.push(
+        new Duck(`duck-${this.duckSeq++}`, slot, screenW, groundY, speed, round.turn, this.armoredSlots.has(slot), this.shySlots.has(slot)),
+      );
       this.released++;
+      this.stats.ducks++;
     }
     this.focus.reset();
   }
@@ -274,14 +360,15 @@ export class DuckGame {
   private updateExpressions(frame: FaceFrame, dt: number): void {
     const now = performance.now();
     const t = frame.timestamp;
+    const capacity = this.setup!.weapon.ammo;
 
     // Recarga: sobrancelhas levantadas por BROW_RELOAD_HOLD_MS; uma recarga por levantada.
     if ((frame.blendshapes.browInnerUp ?? 0) > BROW_UP_THRESHOLD) {
       this.browUpSince ??= t;
       if (!this.browHandled && t - this.browUpSince >= BROW_RELOAD_HOLD_MS) {
         this.browHandled = true;
-        if (this.ammo < AMMO_CAPACITY) {
-          this.ammo = AMMO_CAPACITY;
+        if (this.ammo < capacity) {
+          this.ammo = capacity;
           this.flashes.push({ x: 110, y: this.hudBaseY - 40, at: now, text: 'recarregado', hit: true });
         }
       }
@@ -298,31 +385,26 @@ export class DuckGame {
 
   // ---------- Tiro ----------
 
-  private onDeliberateBlink(closureStart: number): void {
-    if (this.phase === 'gameOver') {
-      this.start();
-      return;
-    }
+  private shoot(closureStart: number): void {
     if (this.phase !== 'wave') return;
+    const setup = this.setup!;
+    const weapon = setup.weapon;
+    const roundNumber = this.roundIndex + 1;
 
     // Mira de preBlinkBufferMs antes de os olhos começarem a fechar.
-    const at = closureStart - this.config.preBlinkBufferMs;
-    const shot = nearest(this.aimHistory, at);
+    const shot = nearest(this.aimHistory, closureStart - this.config.preBlinkBufferMs);
     const now = performance.now();
     if (!shot) return;
 
-    const alive = this.ducks.filter((d) => d.isTargetable());
+    const visible = this.ducks.filter((d) => d.isTargetable() && isLit(setup.environment, d.x, d.y, this.light));
 
-    // Super cheio: a piscada vira a Rajada — todos os patos na tela caem, inclusive blindados.
-    // Não gasta munição nem foco.
+    // Super cheio: a piscada vira a Rajada — todos os patos visíveis caem, inclusive blindados.
+    // Não gasta munição nem foco. Na Floresta, só os que estão na luz.
     if (this.superCharge >= 1) {
       this.superCharge = 0;
       this.superFlashAt = now;
-      for (const d of alive) {
-        d.hit();
-        const points = this.score.hit(this.round, d.slot, d.armored ? ARMORED_MULTIPLIER : 1);
-        this.flashes.push({ x: d.x, y: d.y, at: now, text: `+${points}`, hit: true });
-      }
+      this.stats.supers++;
+      for (const d of visible) this.kill(d, roundNumber, now);
       return;
     }
 
@@ -331,27 +413,46 @@ export class DuckGame {
       return;
     }
     this.ammo--;
+    this.stats.shots++;
 
-    const enoughFocus = shot.focus >= this.config.focusToShoot - 1e-9;
+    const enoughFocus = shot.focus >= weapon.focusToShoot(this.config) - 1e-9;
     this.focus.consume();
-
-    const duck =
-      alive.find((d) => d.id === shot.snappedId) ??
-      alive.find((d) => Math.hypot(d.x - shot.cursor.x, d.y - shot.cursor.y) <= HIT_RADIUS);
-
     if (!enoughFocus) {
       this.flashes.push({ ...shot.cursor, at: now, text: 'sem foco', hit: false });
       return;
     }
-    if (duck?.armored) {
-      this.flashes.push({ x: duck.x, y: duck.y, at: now, text: 'blindado! use o super', hit: false });
-    } else if (duck) {
-      duck.hit();
-      const points = this.score.hit(this.round, duck.slot);
-      this.flashes.push({ x: duck.x, y: duck.y, at: now, text: `+${points}`, hit: true });
-    } else {
-      this.flashes.push({ ...shot.cursor, at: now, text: 'errou', hit: false });
+
+    // Quem o tiro atinge: arma de área pega todos no raio; arma normal pega o grudado ou o mais perto.
+    const targets =
+      weapon.areaRadius > 0
+        ? visible.filter((d) => d.id === shot.snappedId || Math.hypot(d.x - shot.cursor.x, d.y - shot.cursor.y) <= weapon.areaRadius)
+        : [
+            visible.find((d) => d.id === shot.snappedId) ??
+              visible.find((d) => Math.hypot(d.x - shot.cursor.x, d.y - shot.cursor.y) <= HIT_RADIUS),
+          ].filter((d): d is Duck => !!d);
+
+    if (weapon.areaRadius > 0) this.flashes.push({ ...shot.cursor, at: now, text: '', hit: false, });
+
+    let killed = 0;
+    for (const d of targets) {
+      if (d.armored) {
+        this.flashes.push({ x: d.x, y: d.y, at: now, text: 'blindado! use o super', hit: false });
+      } else {
+        this.kill(d, roundNumber, now);
+        killed++;
+      }
     }
+    if (killed > 0) this.stats.shotsHit++;
+    else if (targets.length === 0) this.flashes.push({ ...shot.cursor, at: now, text: 'errou', hit: false });
+  }
+
+  private kill(d: Duck, roundNumber: number, now: number): void {
+    d.hit();
+    this.stats.hits++;
+    if (d.armored) this.stats.armoredKills++;
+    if (d.shy) this.stats.shyKills++;
+    const points = this.score.hit(roundNumber, d.slot, d.armored ? ARMORED_MULTIPLIER : 1);
+    this.flashes.push({ x: d.x, y: d.y, at: now, text: `+${points}`, hit: true });
   }
 
   // ---------- Desenho ----------
@@ -367,51 +468,67 @@ export class DuckGame {
       ctx.beginPath();
       ctx.arc(f.x, f.y, 20 + k * 40, 0, Math.PI * 2);
       ctx.stroke();
-      drawText(ctx, f.x, f.y - 50 - k * 20, f.text, f.hit ? 24 : 18, f.hit ? '#facc15' : '#e5e7eb');
+      if (f.text) drawText(ctx, f.x, f.y - 50 - k * 20, f.text, f.hit ? 24 : 18, f.hit ? '#facc15' : '#e5e7eb');
       ctx.restore();
     }
+  }
+
+  private drawTutorialHint(ctx: CanvasRenderingContext2D, screenW: number, needFocus: number): void {
+    let hint: string;
+    if (this.ammo === 0) hint = 'Sem munição: levante as sobrancelhas para recarregar';
+    else if (this.superCharge >= 1) hint = 'Super pronto! Feche os olhos por um instante para a Rajada';
+    else if (this.focus.value >= needFocus) hint = 'Anel verde: feche os dois olhos por um instante para atirar';
+    else if (this.stats.hits >= 2) hint = 'Dica: abra a boca para carregar o super';
+    else hint = 'Olhe para um pato até o anel em volta da mira ficar verde';
+    drawText(ctx, screenW / 2, 84, hint, 20, '#fde68a');
   }
 
   /** Altura da faixa de HUD na grama (usada também para posicionar avisos). */
   private hudBaseY = 0;
 
-  private drawHud(ctx: CanvasRenderingContext2D, screenW: number, screenH: number, groundY: number): void {
+  private drawHud(ctx: CanvasRenderingContext2D, screenW: number, screenH: number, groundY: number, needFocus: number): void {
+    const setup = this.setup!;
     ctx.save();
     ctx.textBaseline = 'middle';
     ctx.font = `600 20px system-ui, 'Segoe UI', sans-serif`;
     ctx.fillStyle = '#f8fafc';
     ctx.textAlign = 'left';
-    ctx.fillText(`Rodada ${this.round}/${ROUNDS}`, 24, 32);
+    ctx.fillText(setup.mode === 'arcade' ? `Rodada ${this.roundIndex + 1}/${setup.rounds.length}` : setup.title, 24, 32);
     ctx.textAlign = 'center';
-    ctx.fillText(`${this.score.total}`, screenW / 2, 32);
+    ctx.fillText(
+      setup.mode === 'arcade' ? `${this.score.total}` : `Patos ${this.stats.hits}${setup.goalHits ? ` / ${setup.goalHits}` : ''}`,
+      screenW / 2,
+      32,
+    );
     ctx.textAlign = 'right';
     ctx.fillStyle = '#94a3b8';
-    ctx.fillText(`Recorde ${this.score.record}`, screenW - 24, 32);
+    ctx.fillText(setup.mode === 'arcade' ? `Recorde ${this.score.record}` : setup.weapon.name, screenW - 24, 32);
     ctx.restore();
 
-    // Placar da rodada: 10 patinhos na grama (amarelo = abatido, vermelho = fugiu).
-    const size = 14;
-    const gap = 10;
-    const totalW = DUCKS_PER_ROUND * (size * 2) + (DUCKS_PER_ROUND - 1) * gap;
+    // Placar da rodada: patinhos na grama (amarelo = abatido, vermelho = fugiu; anel = especial).
+    const count = this.score.roundResults.length || DUCKS_PER_ROUND;
+    const size = count > 10 ? 11 : 14;
+    const gap = 8;
+    const totalW = count * (size * 2) + (count - 1) * gap;
     const baseY = groundY + (screenH - groundY) / 2;
     this.hudBaseY = baseY;
-    for (let i = 0; i < DUCKS_PER_ROUND; i++) {
+    for (let i = 0; i < count; i++) {
       const r = this.score.roundResults[i];
       const x = screenW / 2 - totalW / 2 + size + i * (size * 2 + gap);
       ctx.fillStyle = r === 'hit' ? '#facc15' : r === 'miss' ? '#ef4444' : 'rgba(248, 250, 252, 0.35)';
       ctx.beginPath();
       ctx.arc(x, baseY, size, 0, Math.PI * 2);
       ctx.fill();
-      if (this.armoredSlots.has(i)) {
-        ctx.strokeStyle = '#94a3b8';
+      if (this.armoredSlots.has(i) || this.shySlots.has(i)) {
+        ctx.strokeStyle = this.armoredSlots.has(i) ? '#94a3b8' : '#7dd3fc';
         ctx.lineWidth = 3;
         ctx.stroke();
       }
     }
 
-    // Munição (direita da grama): 3 cartuchos; aviso quando vazio.
+    // Munição (direita da grama): cartuchos; aviso quando vazio.
     const shellX = screenW - 24;
-    for (let i = 0; i < AMMO_CAPACITY; i++) {
+    for (let i = 0; i < setup.weapon.ammo; i++) {
       ctx.fillStyle = i < this.ammo ? '#f59e0b' : 'rgba(248, 250, 252, 0.2)';
       ctx.fillRect(shellX - (i + 1) * 20, baseY - 14, 12, 28);
     }
@@ -426,7 +543,7 @@ export class DuckGame {
     }
     ctx.restore();
 
-    // Super (acima da barra de foco): enche com a boca aberta; cheio pisca "pisque para a Rajada".
+    // Super (acima da barra de foco): enche com a boca aberta; cheio pisca.
     {
       const bw = 180;
       const bh = 12;
@@ -443,7 +560,7 @@ export class DuckGame {
       ctx.fillText(ready ? 'SUPER PRONTO · pisque!' : 'SUPER · abra a boca', bx, by - 12);
     }
 
-    // Barra de foco no canto inferior esquerdo, com a marca do mínimo para atirar.
+    // Barra de foco, com a marca do mínimo da arma.
     if (this.phase === 'wave') {
       const bw = 180;
       const bh = 12;
@@ -451,10 +568,10 @@ export class DuckGame {
       const by = baseY - bh / 2;
       ctx.fillStyle = 'rgba(15, 23, 42, 0.6)';
       ctx.fillRect(bx, by, bw, bh);
-      ctx.fillStyle = this.focus.value >= this.config.focusToShoot ? '#4ade80' : '#38bdf8';
+      ctx.fillStyle = this.focus.value >= needFocus ? '#4ade80' : '#38bdf8';
       ctx.fillRect(bx, by, bw * this.focus.value, bh);
       ctx.fillStyle = '#f8fafc';
-      ctx.fillRect(bx + bw * this.config.focusToShoot - 1, by - 4, 2, bh + 8);
+      ctx.fillRect(bx + bw * needFocus - 1, by - 4, 2, bh + 8);
       ctx.font = `600 13px system-ui, 'Segoe UI', sans-serif`;
       ctx.textAlign = 'left';
       ctx.fillText('FOCO', bx, by - 12);
@@ -462,31 +579,14 @@ export class DuckGame {
   }
 }
 
+function emptyStats(): GameStats {
+  return { ducks: 0, hits: 0, escaped: 0, shots: 0, shotsHit: 0, supers: 0, armoredKills: 0, shyKills: 0, score: 0, newRecord: false };
+}
+
 function nearest(history: AimSnapshot[], t: number): AimSnapshot | null {
   let best: AimSnapshot | null = null;
   for (const h of history) if (!best || Math.abs(h.t - t) < Math.abs(best.t - t)) best = h;
   return best;
-}
-
-function drawBackground(ctx: CanvasRenderingContext2D, w: number, h: number, groundY: number): void {
-  const sky = ctx.createLinearGradient(0, 0, 0, groundY);
-  sky.addColorStop(0, '#0f1b33');
-  sky.addColorStop(1, '#27456b');
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, w, h);
-}
-
-function drawGrass(ctx: CanvasRenderingContext2D, w: number, h: number, groundY: number): void {
-  ctx.fillStyle = '#1f4d2b';
-  ctx.fillRect(0, groundY, w, h - groundY);
-  ctx.fillStyle = '#2d6a3a';
-  for (let x = 0; x < w; x += 18) {
-    ctx.beginPath();
-    ctx.moveTo(x, groundY + 2);
-    ctx.lineTo(x + 9, groundY - 16);
-    ctx.lineTo(x + 18, groundY + 2);
-    ctx.fill();
-  }
 }
 
 function drawDuck(ctx: CanvasRenderingContext2D, d: Duck): void {
@@ -497,14 +597,14 @@ function drawDuck(ctx: CanvasRenderingContext2D, d: Duck): void {
   if (d.tumbling) ctx.rotate(Math.PI);
   ctx.scale(d.facing, 1);
 
-  // corpo (blindado: metal cinza)
-  ctx.fillStyle = d.armored ? '#64748b' : d.state === 'falling' ? '#8b5a2b' : '#6b4f2a';
+  // corpo (blindado: metal cinza; tímido: azulado)
+  ctx.fillStyle = d.armored ? '#64748b' : d.shy ? '#3b6b8f' : d.state === 'falling' ? '#8b5a2b' : '#6b4f2a';
   ctx.beginPath();
   ctx.ellipse(0, 0, r, r * 0.62, 0, 0, Math.PI * 2);
   ctx.fill();
   // asa batendo
   const flap = Math.sin(d.wingPhase) * 0.9;
-  ctx.fillStyle = '#4a3720';
+  ctx.fillStyle = d.shy ? '#2a4d68' : '#4a3720';
   ctx.beginPath();
   ctx.ellipse(-r * 0.15, -r * 0.1, r * 0.55, r * 0.28, -flap, 0, Math.PI * 2);
   ctx.fill();
@@ -514,7 +614,6 @@ function drawDuck(ctx: CanvasRenderingContext2D, d: Duck): void {
   ctx.arc(r * 0.85, -r * 0.45, r * 0.38, 0, Math.PI * 2);
   ctx.fill();
   if (d.armored) {
-    // capacete e placa no peito
     ctx.fillStyle = '#cbd5e1';
     ctx.beginPath();
     ctx.arc(r * 0.85, -r * 0.5, r * 0.4, Math.PI, 0);
@@ -525,9 +624,17 @@ function drawDuck(ctx: CanvasRenderingContext2D, d: Duck): void {
     ctx.ellipse(0, 0, r * 0.7, r * 0.4, 0, 0, Math.PI * 2);
     ctx.stroke();
   }
+  // olho (tímido: olho grande e assustado, maior ainda quando foge)
+  const eyeR = d.shy ? r * (d.fleeing ? 0.2 : 0.14) : r * 0.08;
+  if (d.shy) {
+    ctx.fillStyle = '#f8fafc';
+    ctx.beginPath();
+    ctx.arc(r * 0.95, -r * 0.55, eyeR * 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.fillStyle = d.state === 'falling' ? '#f8fafc' : '#0b0d12';
   ctx.beginPath();
-  ctx.arc(r * 0.95, -r * 0.55, r * 0.08, 0, Math.PI * 2);
+  ctx.arc(r * 0.95, -r * 0.55, eyeR, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = '#f59e0b';
   ctx.beginPath();
