@@ -25,17 +25,17 @@ export interface DebugConfig {
   beta: number;                  // 0.007
   dCutoff: number;               // 1.0
   preBlinkBufferMs: number;      // 180
-  snapRadius: number;            // 70
-  snapHysteresis: number;        // 25
+  snapRadius: number;            // 110  (era 70 no M1; maior para acompanhar patos)
+  snapHysteresis: number;        // 60   (era 25)
   headWeight: number;            // 0.65
   headDeadzone: number;          // 3.0   (graus)
   eyeMaxOffset: number;          // 150   (pixels)
   ridgeLambda: number;           // 0.001
   cursorMinCutoff: number;       // 1.0
-  cursorBeta: number;            // 0.02
-  duckSpeed: number;             // 220   (px/s na rodada 1; +25% por rodada)
-  duckEscapeMs: number;          // 6000  (tempo de voo antes de o pato fugir)
+  cursorBeta: number;            // 0.15 (era 0.02; menos atraso com alvo em movimento)
+  duckSpeed: number;             // 130   (px/s na rodada 1; +30% por rodada)
+  duckEscapeMs: number;          // 9000  (tempo de voo antes de o pato fugir)
   focusFillPerSec: number;       // 1.25  (foco ganho por segundo com a mira grudada num pato)
-  focusDecayPerSec: number;      // 0.8   (foco perdido por segundo fora dos patos)
-  focusToShoot: number;          // 1.0   (foco mínimo para o tiro derrubar)
+  focusDecayPerSec: number;      // 0.3   (foco perdido por segundo fora dos patos, após 300 ms de tolerância)
+  focusToShoot: number;          // 0.6   (foco mínimo para o tiro derrubar)
 }

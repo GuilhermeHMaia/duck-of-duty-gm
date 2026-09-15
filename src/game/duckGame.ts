@@ -8,7 +8,10 @@ import { DUCKS_PER_ROUND, ROUNDS, Score } from './score';
 const DUCKS_PER_WAVE = 2;
 const ROUND_INTRO_MS = 1600;
 const ROUND_END_MS = 2200;
-const SPEED_STEP_PER_ROUND = 0.25;
+const SPEED_STEP_PER_ROUND = 0.3;   // rodada 5 = duckSpeed × 2,2
+/** Intervalo entre mudanças de direção: longo na rodada 1 (voo previsível), curto na última. */
+const TURN_INTERVAL_FIRST: readonly [number, number] = [2200, 3200];
+const TURN_INTERVAL_LAST: readonly [number, number] = [900, 1500];
 const GROUND_FRACTION = 0.84;     // a grama começa em 84% da altura
 const HIT_RADIUS = 48;            // tiro sem snap: distância máxima do centro do pato
 const AIM_HISTORY_MS = 1500;
@@ -207,7 +210,12 @@ export class DuckGame {
     const count = Math.min(DUCKS_PER_WAVE, DUCKS_PER_ROUND - this.released);
     this.ducks = [];
     for (let i = 0; i < count; i++) {
-      this.ducks.push(new Duck(`duck-${this.duckSeq++}`, this.released, screenW, groundY, speed));
+      const k = (this.round - 1) / Math.max(1, ROUNDS - 1);
+      const turn: [number, number] = [
+        TURN_INTERVAL_FIRST[0] + (TURN_INTERVAL_LAST[0] - TURN_INTERVAL_FIRST[0]) * k,
+        TURN_INTERVAL_FIRST[1] + (TURN_INTERVAL_LAST[1] - TURN_INTERVAL_FIRST[1]) * k,
+      ];
+      this.ducks.push(new Duck(`duck-${this.duckSeq++}`, this.released, screenW, groundY, speed, turn));
       this.released++;
     }
     this.focus.reset();

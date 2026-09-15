@@ -6,6 +6,13 @@ import type { DebugConfig, FaceFrame } from '../types';
 const HEAD_RANGE_DEG = 20;
 /** Quanto histórico da contribuição do olho guardar para o congelamento na piscada. */
 const EYE_HISTORY_MS = 1000;
+/**
+ * Atraso típico da mira em relação ao mundo (câmera + detecção + filtro). Para alvos em
+ * movimento, o snap compara a mira também com a posição que o alvo tinha há esse tempo:
+ * a mira atrasada "atrás" de um pato rápido não conta como ter saído dele.
+ */
+const SNAP_LAG_MS = 150;
+const TARGET_HISTORY_MS = 400;
 
 export interface AimTarget {
   id: string;
@@ -46,6 +53,8 @@ export class Aiming {
   private frozenEye: { x: number; y: number } | null = null;
   private holdUntil = -Infinity;
   private snappedId: string | null = null;
+  /** Posições recentes de cada alvo, para o snap compensar o atraso da mira. */
+  private targetHistory = new Map<string, { t: number; x: number; y: number }[]>();
   private state: AimState | null = null;
 
   constructor(
@@ -146,15 +155,22 @@ export class Aiming {
     };
 
     // 5. Snap com histerese: gruda abaixo de snapRadius, só solta acima de snapRadius + snapHysteresis.
+    // A distância usada é a menor entre a posição atual do alvo e a de SNAP_LAG_MS atrás
+    // (para alvos parados as duas são iguais).
+    this.recordTargets(frame.timestamp, targets);
+    const snapDistance = (tg: AimTarget) => {
+      const past = this.targetPositionAgo(tg.id, frame.timestamp, SNAP_LAG_MS);
+      return Math.min(distance(unsnapped, tg), past ? distance(unsnapped, past) : Infinity);
+    };
     const current = this.snappedId ? targets.find((tg) => tg.id === this.snappedId) : undefined;
-    if (current && distance(unsnapped, current) <= c.snapRadius + c.snapHysteresis) {
+    if (current && snapDistance(current) <= c.snapRadius + c.snapHysteresis) {
       // continua grudado
     } else {
       this.snappedId = null;
       let best: AimTarget | null = null;
       let bestDist = c.snapRadius;
       for (const tg of targets) {
-        const d = distance(unsnapped, tg);
+        const d = snapDistance(tg);
         if (d < bestDist) {
           bestDist = d;
           best = tg;
@@ -174,6 +190,24 @@ export class Aiming {
       hasModel: !!model,
     };
     return this.state;
+  }
+
+  private recordTargets(now: number, targets: readonly AimTarget[]): void {
+    const alive = new Set(targets.map((tg) => tg.id));
+    for (const id of this.targetHistory.keys()) if (!alive.has(id)) this.targetHistory.delete(id);
+    for (const tg of targets) {
+      const h = this.targetHistory.get(tg.id) ?? [];
+      h.push({ t: now, x: tg.x, y: tg.y });
+      while (h.length > 0 && h[0].t < now - TARGET_HISTORY_MS) h.shift();
+      this.targetHistory.set(tg.id, h);
+    }
+  }
+
+  private targetPositionAgo(id: string, now: number, ms: number): { x: number; y: number } | null {
+    const h = this.targetHistory.get(id);
+    if (!h || h.length === 0) return null;
+    const want = now - ms;
+    return h.reduce((best, p) => (Math.abs(p.t - want) < Math.abs(best.t - want) ? p : best));
   }
 
   /** Contribuição do olho mais próxima de `ms` antes de `now`, entre os frames com olhos abertos. */
