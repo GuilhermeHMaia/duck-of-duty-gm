@@ -17,8 +17,8 @@ export interface FaceFrame {
 }
 
 export interface DebugConfig {
-  winkThreshold: number;         // 0.5
-  winkCounterThreshold: number;  // 0.25
+  winkThreshold: number;         // 0.5  — limiar da DIFERENÇA entre os olhos (|eyeBlinkLeft − eyeBlinkRight|) para wink
+  winkCounterThreshold: number;  // 0.25 — sem uso desde que o wink passou a ser por diferença
   winkMinFrames: number;         // 2
   doubleBlinkThreshold: number;  // 0.5
   minCutoff: number;             // 1.0

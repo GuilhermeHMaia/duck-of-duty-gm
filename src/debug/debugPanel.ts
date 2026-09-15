@@ -11,13 +11,13 @@ const SERIES = [
   { key: 'eyeBlinkRight', color: '#fb923c' },
   { key: 'jawOpen', color: '#4ade80' },
   { key: 'browInnerUp', color: '#c084fc' },
+  { key: '|L−R|', color: '#f472b6' }, // diferença entre os olhos: é ela que dispara o wink
 ] as const;
 
 type SeriesKey = (typeof SERIES)[number]['key'];
 
 const THRESHOLD_LINES: { key: keyof DebugConfig; color: string }[] = [
-  { key: 'winkThreshold', color: '#f8fafc' },
-  { key: 'winkCounterThreshold', color: '#94a3b8' },
+  { key: 'winkThreshold', color: '#f8fafc' }, // comparar com a linha |L−R|
   { key: 'doubleBlinkThreshold', color: '#facc15' },
 ];
 
@@ -183,6 +183,7 @@ export class DebugPanel {
         eyeBlinkRight: b.eyeBlinkRight ?? 0,
         jawOpen: b.jawOpen ?? 0,
         browInnerUp: b.browInnerUp ?? 0,
+        '|L−R|': Math.abs((b.eyeBlinkLeft ?? 0) - (b.eyeBlinkRight ?? 0)),
       },
     });
   }

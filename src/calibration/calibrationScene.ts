@@ -95,8 +95,11 @@ export class CalibrationScene {
     const c = this.config;
     const blinkL = frame.blendshapes.eyeBlinkLeft ?? 0;
     const blinkR = frame.blendshapes.eyeBlinkRight ?? 0;
-    // Rearma só depois que os dois olhos reabrem: um wink = uma ação.
-    if (frame.faceDetected && blinkL < c.winkThreshold && blinkR < c.winkThreshold) this.armed = true;
+    // Rearma só depois que o wink termina (a diferença entre os olhos volta abaixo do
+    // limiar) e sem piscada dupla em curso: um wink = uma ação.
+    if (frame.faceDetected && Math.abs(blinkL - blinkR) <= c.winkThreshold && !frame.eyeState.bothClosed) {
+      this.armed = true;
+    }
 
     const wink = frame.eyeState.winkLeft ? 'left' : frame.eyeState.winkRight ? 'right' : null;
     if (!wink || !this.armed) return;
@@ -242,9 +245,7 @@ export class CalibrationScene {
     const closing = (f: FaceFrame): boolean => {
       const l = f.blendshapes.eyeBlinkLeft ?? 0;
       const r = f.blendshapes.eyeBlinkRight ?? 0;
-      return wink === 'left'
-        ? l > c.winkThreshold && r < c.winkCounterThreshold
-        : r > c.winkThreshold && l < c.winkCounterThreshold;
+      return wink === 'left' ? l - r > c.winkThreshold : r - l > c.winkThreshold;
     };
     let i = frames.length - 1;
     while (i >= 0 && frames[i].faceDetected && closing(frames[i])) i--;

@@ -87,7 +87,7 @@ export class FaceTracker {
       ? { x: this.filterX.filter(gazeRaw.x, ts / 1000), y: this.filterY.filter(gazeRaw.y, ts / 1000) }
       : null;
 
-    const gazeFeatures = extractGazeFeatures(faceLandmarks, video.videoWidth, video.videoHeight, eyeState, c.winkThreshold);
+    const gazeFeatures = extractGazeFeatures(faceLandmarks, video.videoWidth, video.videoHeight, eyeState, c.doubleBlinkThreshold);
 
     return { timestamp: ts, gazeRaw, gazeFiltered, headPose, blendshapes, eyeState, faceDetected: true, gazeFeatures };
   }

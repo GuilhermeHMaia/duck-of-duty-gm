@@ -59,8 +59,8 @@ export class GazeEstimator {
     const toPx = (i: number): Point => ({ x: landmarks[i].x * imageWidth, y: landmarks[i].y * imageHeight });
 
     // Numa piscadela, usa só o olho que ficou aberto.
-    const leftUsable = 1 - eyeState.leftOpen <= this.config.winkThreshold;
-    const rightUsable = 1 - eyeState.rightOpen <= this.config.winkThreshold;
+    const leftUsable = 1 - eyeState.leftOpen <= this.config.doubleBlinkThreshold;
+    const rightUsable = 1 - eyeState.rightOpen <= this.config.doubleBlinkThreshold;
 
     const samples: Point[] = [];
     if (leftUsable) samples.push(irisPositionInEye(LEFT_EYE, toPx));
@@ -100,17 +100,18 @@ export class GazeEstimator {
  *
  * Os termos de 2ª ordem e o bias são montados depois (calibrationStore.expandFeatures).
  *
- * Retorna null se qualquer olho estiver fechado (eyeBlink > winkThreshold, o mesmo
- * critério do gazeRaw).
+ * Retorna null se qualquer olho estiver fechado: eyeBlink > closedThreshold
+ * (o doubleBlinkThreshold, mesmo critério do gazeRaw). Um olho semicerrado, como ao
+ * olhar para baixo, continua valendo como aberto.
  */
 export function extractGazeFeatures(
   landmarks: ReadonlyArray<Point>,
   imageWidth: number,
   imageHeight: number,
   eyeState: FaceFrame['eyeState'],
-  winkThreshold: number,
+  closedThreshold: number,
 ): number[] | null {
-  if (1 - eyeState.leftOpen > winkThreshold || 1 - eyeState.rightOpen > winkThreshold) return null;
+  if (1 - eyeState.leftOpen > closedThreshold || 1 - eyeState.rightOpen > closedThreshold) return null;
   const toPx = (i: number): Point => ({ x: landmarks[i].x * imageWidth, y: landmarks[i].y * imageHeight });
   const left = irisOffsetFromCorners(LEFT_EYE, toPx);
   const right = irisOffsetFromCorners(RIGHT_EYE, toPx);
