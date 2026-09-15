@@ -3,7 +3,7 @@ import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { MODEL_ASSET_PATH, WASM_BASE_URL } from '../config';
 import type { DebugConfig, FaceFrame } from '../types';
 import { BlinkDetector } from './blinkDetector';
-import { extractGazeFeatures, GazeEstimator } from './gazeEstimator';
+import { extractEyelidFeatures, extractGazeFeatures, GazeEstimator } from './gazeEstimator';
 import { extractHeadPose } from './headPose';
 import { OneEuroFilter } from './oneEuroFilter';
 
@@ -63,6 +63,7 @@ export class FaceTracker {
         eyeState: { leftOpen: 0, rightOpen: 0, bothClosed: false, winkLeft: false, winkRight: false },
         faceDetected: false,
         gazeFeatures: null,
+        eyelidFeatures: null,
       };
     }
     this.landmarks = faceLandmarks;
@@ -89,6 +90,8 @@ export class FaceTracker {
 
     const gazeFeatures = extractGazeFeatures(faceLandmarks, video.videoWidth, video.videoHeight, eyeState, c.doubleBlinkThreshold);
 
-    return { timestamp: ts, gazeRaw, gazeFiltered, headPose, blendshapes, eyeState, faceDetected: true, gazeFeatures };
+    const eyelidFeatures = extractEyelidFeatures(faceLandmarks, video.videoWidth, video.videoHeight); // diagnóstico
+
+    return { timestamp: ts, gazeRaw, gazeFiltered, headPose, blendshapes, eyeState, faceDetected: true, gazeFeatures, eyelidFeatures };
   }
 }

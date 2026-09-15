@@ -3,14 +3,15 @@ import { fitRidge, predict } from './ridgeRegression';
 
 type HeadPose = FaceFrame['headPose'];
 
-export const CALIBRATION_VERSION = 1;
+// v2: modelo linear de 5 termos (v1 tinha 11 termos; pesos incompatíveis).
+export const CALIBRATION_VERSION = 2;
 const STORAGE_KEY = `duck-of-duty.calibration.v${CALIBRATION_VERSION}`;
 
 export interface CalibrationModel {
   version: number;
   weightsX: number[];
   weightsY: number[];
-  /** Média e desvio de cada um dos 11 termos no treino, para padronizar (posição 0 = bias, fica 0/1). */
+  /** Média e desvio de cada termo no treino, para padronizar (posição 0 = bias, fica 0/1). */
   featureMean: number[];
   featureStd: number[];
   headBaseline: { yaw: number; pitch: number; roll: number };
@@ -28,18 +29,24 @@ export interface CalibrationSample {
   target: { x: number; y: number };
   /** Índice 0–8 na grade 3×3. */
   pointIndex: number;
+  /** DIAGNÓSTICO TEMPORÁRIO: medianas na janela de sinais verticais candidatos (pálpebras, eyeLook*). */
+  extra?: Record<string, number>;
 }
 
 /** absent: sem modelo · loaded: veio do localStorage · trained: treinado nesta sessão. */
 export type CalibrationStatus = 'absent' | 'loaded' | 'trained';
 
 /**
- * Vetor de 11 termos passado à regressão:
- *   [1, lx, ly, rx, ry, lx², ly², rx², ry², lx·ly, rx·ry]
+ * Vetor passado à regressão: [1, lx, ly, rx, ry]  (linear, 5 termos).
+ *
+ * A especificação original pedia 11 termos (com os quadráticos lx², ly², rx², ry²,
+ * lx·ly, rx·ry). Com as amostras reais (18, sinal vertical fraco), os quadráticos
+ * ajustavam ruído: leave-one-out de 305 px contra 149 px do linear. Ver
+ * QUADRATIC_REFERENCE no diagnóstico para comparar a cada calibração.
  */
 export function expandFeatures(base: number[]): number[] {
   const [lx, ly, rx, ry] = base;
-  return [1, lx, ly, rx, ry, lx * lx, ly * ly, rx * rx, ry * ry, lx * ly, rx * ry];
+  return [1, lx, ly, rx, ry];
 }
 
 export function median(values: number[]): number {
@@ -170,8 +177,8 @@ interface Weights {
 /**
  * Padroniza os 10 termos não-bias (média 0, desvio 1 no conjunto de treino) e
  * resolve duas ridges independentes, uma para X e outra para Y de tela.
- * Sem padronizar, os termos quadráticos (valores ~0,001) e os lineares (~0,05)
- * ficariam em escalas diferentes e o mesmo λ penalizaria cada um de forma desigual.
+ * Sem padronizar, features em escalas diferentes (lx varia ~0,14, ly ~0,06) seriam
+ * penalizadas de forma desigual pelo mesmo λ.
  */
 function trainWeights(samples: CalibrationSample[], lambda: number, expand = expandFeatures): Weights {
   const rows = samples.map((s) => expand(s.features));
@@ -206,14 +213,14 @@ function standardize(row: number[], mean: number[], std: number[]): number[] {
 
 /**
  * Imprime no Console, a cada treino:
- *  1. erro dentro do treino × leave-one-out, para o modelo de 11 termos e para um só linear;
+ *  1. erro dentro do treino × leave-one-out, para o modelo linear atual e o quadrático de referência;
  *  2. erro separado em X e em Y;
  *  3. consistência das features: distância entre as 2 amostras do MESMO alvo × entre alvos diferentes;
  *  4. JSON com as amostras, para copiar e analisar fora do navegador.
  */
 function logCalibrationDiagnostics(samples: CalibrationSample[], lambda: number, screenW: number, screenH: number): void {
-  const linear = (b: number[]) => [1, b[0], b[1], b[2], b[3]];
-  const models = { 'quadrático (11)': expandFeatures, 'linear (5)': linear };
+  const QUADRATIC_REFERENCE = ([lx, ly, rx, ry]: number[]) => [1, lx, ly, rx, ry, lx * lx, ly * ly, rx * rx, ry * ry, lx * ly, rx * ry];
+  const models = { 'linear (5) — atual': expandFeatures, 'quadrático (11) — referência': QUADRATIC_REFERENCE };
   const avg = (v: number[]) => v.reduce((a, b) => a + b, 0) / Math.max(v.length, 1);
 
   const table: Record<string, Record<string, string>> = {};

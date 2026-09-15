@@ -98,7 +98,7 @@ export class GazeEstimator {
  * olho remove a inclinação da cabeça. Sem espelhamento de sinal: a regressão
  * aprende a orientação.
  *
- * Os termos de 2ª ordem e o bias são montados depois (calibrationStore.expandFeatures).
+ * O bias é montado depois (calibrationStore.expandFeatures).
  *
  * Retorna null se qualquer olho estiver fechado: eyeBlink > closedThreshold
  * (o doubleBlinkThreshold, mesmo critério do gazeRaw). Um olho semicerrado, como ao
@@ -117,6 +117,39 @@ export function extractGazeFeatures(
   const right = irisOffsetFromCorners(RIGHT_EYE, toPx);
   if (!left || !right) return null;
   return [left.x, left.y, right.x, right.y];
+}
+
+/**
+ * DIAGNÓSTICO TEMPORÁRIO: posição das pálpebras, candidata a sinal vertical extra.
+ *   [lSuperior, lInferior, rSuperior, rInferior]
+ * Cada valor = (pálpebra − ponto médio dos cantos) · v / largura do olho, no mesmo
+ * sistema de eixos das features da íris (v aponta para baixo). A pálpebra superior
+ * acompanha o olhar vertical, então pode separar as linhas da grade melhor que a íris.
+ */
+export function extractEyelidFeatures(
+  landmarks: ReadonlyArray<Point>,
+  imageWidth: number,
+  imageHeight: number,
+): number[] | null {
+  const toPx = (i: number): Point => ({ x: landmarks[i].x * imageWidth, y: landmarks[i].y * imageHeight });
+  const out: number[] = [];
+  for (const eye of [LEFT_EYE, RIGHT_EYE]) {
+    const upper = offsetAlongV(eye, toPx(eye.upperLid), toPx);
+    const lower = offsetAlongV(eye, toPx(eye.lowerLid), toPx);
+    if (upper === null || lower === null) return null;
+    out.push(upper, lower);
+  }
+  return out;
+}
+
+function offsetAlongV(eye: EyeIndices, p: Point, toPx: (i: number) => Point): number | null {
+  const a = toPx(eye.cornerImageLeft);
+  const b = toPx(eye.cornerImageRight);
+  const width = Math.hypot(b.x - a.x, b.y - a.y);
+  if (width < 1e-3) return null;
+  const vx = -(b.y - a.y) / width;
+  const vy = (b.x - a.x) / width;
+  return ((p.x - (a.x + b.x) / 2) * vx + (p.y - (a.y + b.y) / 2) * vy) / width;
 }
 
 function irisOffsetFromCorners(eye: EyeIndices, toPx: (i: number) => Point): Point | null {

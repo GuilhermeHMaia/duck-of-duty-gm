@@ -14,6 +14,8 @@ export interface FaceFrame {
   faceDetected: boolean;
   /** Features oculares base [lx, ly, rx, ry] (ver extractGazeFeatures). null sem rosto ou com olho fechado. */
   gazeFeatures: number[] | null;
+  /** DIAGNÓSTICO TEMPORÁRIO: pálpebras [lSup, lInf, rSup, rInf] (ver extractEyelidFeatures). */
+  eyelidFeatures: number[] | null;
 }
 
 export interface DebugConfig {

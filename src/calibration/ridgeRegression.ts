@@ -2,11 +2,11 @@
  * Regressão ridge (mínimos quadrados com penalidade L2), sem dependências.
  *
  * PROBLEMA
- * Temos n amostras. Cada linha X[i] é um vetor de p features (aqui p = 11, com o
+ * Temos n amostras. Cada linha X[i] é um vetor de p features (aqui p = 5, com o
  * bias na posição 0) e y[i] é o valor alvo (a coordenada X ou Y do alvo na tela,
  * em pixels). Queremos pesos w tais que  X[i] · w ≈ y[i].
  *
- * Mínimos quadrados puro minimiza  ‖Xw − y‖².  Com poucas amostras (18) e 11
+ * Mínimos quadrados puro minimiza  ‖Xw − y‖².  Com poucas amostras (18) e vários
  * pesos, isso tende a sobreajustar: os pesos crescem para caçar o ruído. A ridge
  * soma uma penalidade no tamanho dos pesos:
  *
@@ -22,7 +22,7 @@
  *     w = (XᵀX + λI')⁻¹ Xᵀy
  *
  * onde I' é a identidade com I'[0][0] = 0 (sem penalizar o bias).
- * XᵀX é p×p (11×11), então inverter é barato; basta Gauss-Jordan.
+ * XᵀX é p×p (5×5), então inverter é barato; basta Gauss-Jordan.
  */
 
 /** Maior |pivô| aceitável relativo à escala da matriz, abaixo disso tratamos como singular. */

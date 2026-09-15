@@ -13,6 +13,11 @@ const MAX_HEAD_FROM_OTHERS_DEG = 5; // distância máxima da pose até a mediana
 /** Desvio padrão máximo de cada feature na janela, em larguras de olho (unidade crua das features). */
 const FEATURE_STD_LIMIT = 0.02;
 const FEATURE_NAMES = ['lx', 'ly', 'rx', 'ry'];
+/** DIAGNÓSTICO TEMPORÁRIO: blendshapes de direção do olhar registrados junto com cada amostra. */
+const EYE_LOOK_BLENDSHAPES = [
+  'eyeLookUpLeft', 'eyeLookUpRight', 'eyeLookDownLeft', 'eyeLookDownRight',
+  'eyeLookInLeft', 'eyeLookInRight', 'eyeLookOutLeft', 'eyeLookOutRight',
+];
 
 // ---------- Apresentação ----------
 const PASSES = 2;
@@ -301,12 +306,23 @@ export class CalibrationScene {
       }
     }
 
+    // DIAGNÓSTICO TEMPORÁRIO: candidatos a sinal vertical, só registrados (não entram no modelo).
+    const extra: Record<string, number> = {};
+    const lidNames = ['lidUpperL', 'lidLowerL', 'lidUpperR', 'lidLowerR'];
+    if (win.every((f) => f.eyelidFeatures)) {
+      lidNames.forEach((name, k) => (extra[name] = median(win.map((f) => f.eyelidFeatures![k]))));
+    }
+    for (const name of EYE_LOOK_BLENDSHAPES) {
+      extra[name] = median(win.map((f) => f.blendshapes[name] ?? 0));
+    }
+
     const target = gridTarget(this.currentPoint, screenW, screenH);
     return {
       features: features.map(median),
       headPose,
       target: { x: target.x, y: target.y },
       pointIndex: this.currentPoint,
+      extra,
     };
   }
 
