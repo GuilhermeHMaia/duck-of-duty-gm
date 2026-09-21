@@ -6,7 +6,7 @@ export type WelcomeState = 'intro' | 'loading' | 'error';
 const CONTROLS: [string, string][] = [
   ['Mirar', 'olhos + cabeça'],
   ['Atirar', 'fechar os dois olhos por um instante'],
-  ['Recarregar', 'fechar só o olho esquerdo'],
+  ['Recarregar', 'olhar a caixa de munição (ou fechar só o olho esquerdo)'],
   ['Trocar de arma', 'fechar só o olho direito'],
   ['Carregar a Rajada', 'abrir a boca'],
 ];

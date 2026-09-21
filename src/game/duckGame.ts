@@ -86,6 +86,14 @@ export interface GameStats {
  * começo de uma piscada de tiro), o wink é cancelado. Cada rodada começa com os pentes cheios.
  */
 const WINK_HOLD_MS = 250;
+/**
+ * Recarga pelo olhar: manter a mira (antes do snap) na caixa de munição, no canto da grama, por
+ * LOOK_RELOAD_MS recarrega, como "atirar fora da tela" nos jogos de pistola. A caixa tem folga de
+ * AMMO_ZONE_PADDING px porque a mira do olho não é precisa. Sair da caixa esvazia o progresso
+ * 2× mais rápido do que enche, então um tremor rápido para fora não zera tudo.
+ */
+export const LOOK_RELOAD_MS = 600;
+export const AMMO_ZONE_PADDING = 60;
 /** Super: boca aberta (jawOpen) carrega; ~SUPER_CHARGE_MS de boca aberta acumulada enche a barra. */
 const JAW_OPEN_THRESHOLD = 0.4;
 const SUPER_CHARGE_MS = 2000;
@@ -138,7 +146,7 @@ interface Feather {
  * Tiro = piscada deliberada (dois olhos fechados por ≥ BLINK_TRIGGER_MS). A posição do tiro é
  * a da mira preBlinkBufferMs ANTES de os olhos começarem a fechar. O tiro só derruba se o foco
  * naquele instante for ≥ o da arma, e consome o foco todo.
- * Munição: wink esquerdo recarrega; wink direito troca de arma. Super "Rajada": boca aberta enche
+ * Munição: olhar a caixa de munição ou wink esquerdo recarrega; wink direito troca de arma. Super "Rajada": boca aberta enche
  * a barra; cheia, a próxima piscada derruba todos os patos visíveis, inclusive os blindados.
  * Floresta: só dá para ver e mirar patos dentro da luz; os Tímidos fogem dela.
  * Pântano: neblina com clareira na mira; os Fantasmas somem e reaparecem.
@@ -186,6 +194,9 @@ export class DuckGame {
   /** Centro do círculo de visão (a mira antes do snap, do último frame). */
   private light: { x: number; y: number } | null = null;
   private stats: GameStats = emptyStats();
+  /** Caixa de munição na tela (calculada no desenho do HUD) e progresso da recarga pelo olhar. */
+  private ammoZone: { x: number; y: number; w: number; h: number } | null = null;
+  private lookReloadMs = 0;
 
   constructor(
     private readonly config: DebugConfig,
@@ -257,7 +268,10 @@ export class DuckGame {
       }
     }
 
-    if (this.phase === 'wave' || this.phase === 'roundIntro') this.updateExpressions(frame, dt);
+    if (this.phase === 'wave' || this.phase === 'roundIntro') {
+      this.updateExpressions(frame, dt);
+      this.updateLookReload(frame, aim, dt);
+    }
 
     // Gatilho: piscada deliberada, uma ação por piscada.
     if (frame.eyeState.bothClosed) {
@@ -365,6 +379,7 @@ export class DuckGame {
     this.minionGapStart = null;
     this.endMessage = '';
     this.focus.reset();
+    this.lookReloadMs = 0;
     this.ammoByWeapon = new Map(this.setup!.weapons.map((w) => [w.id, w.ammo]));
     // Sorteia quais patos da rodada são especiais (nunca o primeiro, para dar tempo de aprender).
     const slots = Array.from({ length: Math.max(0, round.ducks - 1) }, (_, i) => i + 1).sort(() => Math.random() - 0.5);
@@ -516,6 +531,28 @@ export class DuckGame {
     this.flashes.push({ x: this.hudShellX - 30, y: this.hudBaseY - 50, at: now, text: 'recarregado', hit: true });
   }
 
+  /** Olhar a caixa de munição recarrega (ver LOOK_RELOAD_MS). Olhos fechados não contam. */
+  private updateLookReload(frame: FaceFrame, aim: AimState | null, dt: number): void {
+    const zone = this.ammoZone;
+    if (!zone || this.ammo >= this.weapon().ammo) {
+      this.lookReloadMs = 0;
+      return;
+    }
+    const p = aim?.unsnapped;
+    const inside =
+      !!p &&
+      !frame.eyeState.bothClosed &&
+      p.x >= zone.x - AMMO_ZONE_PADDING &&
+      p.x <= zone.x + zone.w + AMMO_ZONE_PADDING &&
+      p.y >= zone.y - AMMO_ZONE_PADDING &&
+      p.y <= zone.y + zone.h + AMMO_ZONE_PADDING;
+    this.lookReloadMs = inside ? this.lookReloadMs + dt : Math.max(0, this.lookReloadMs - 2 * dt);
+    if (this.lookReloadMs >= LOOK_RELOAD_MS) {
+      this.lookReloadMs = 0;
+      this.reload(performance.now());
+    }
+  }
+
   private switchWeapon(now: number): void {
     const weapons = this.setup!.weapons;
     if (weapons.length < 2) {
@@ -523,6 +560,7 @@ export class DuckGame {
       return;
     }
     this.weaponIndex = (this.weaponIndex + 1) % weapons.length;
+    this.lookReloadMs = 0;
     sfx.switchWeapon();
     this.flashes.push({ x: this.hudShellX - 80, y: this.hudBaseY - 50, at: now, text: this.weapon().name, hit: true });
   }
@@ -594,7 +632,7 @@ export class DuckGame {
 
     if (this.ammo <= 0) {
       sfx.empty();
-      this.flashes.push({ ...shot.cursor, at: now, text: 'sem munição · wink esquerdo recarrega', hit: false });
+      this.flashes.push({ ...shot.cursor, at: now, text: 'sem munição · olhe a caixa de munição', hit: false });
       return;
     }
     this.ammo--;
@@ -762,7 +800,7 @@ export class DuckGame {
 
   private drawTutorialHint(ctx: CanvasRenderingContext2D, screenW: number, needFocus: number): void {
     let hint: string;
-    if (this.ammo === 0) hint = 'Sem munição: feche só o olho ESQUERDO por um instante para recarregar';
+    if (this.ammo === 0) hint = 'Sem munição: olhe para a CAIXA DE MUNIÇÃO (canto de baixo) ou feche só o olho esquerdo';
     else if (this.superCharge >= 1) hint = 'Super pronto! Feche os olhos por um instante para a Rajada';
     else if (this.focus.value >= needFocus) hint = 'Anel verde: feche os dois olhos por um instante para atirar';
     else if (this.stats.hits >= 2) hint = 'Dica: abra a boca para carregar o super';
@@ -843,10 +881,30 @@ export class DuckGame {
       }
     }
 
-    // Munição (direita da grama): cartuchos da arma atual e os comandos de wink.
+    // Munição (direita da grama): caixa de munição (olhar recarrega), cartuchos e comandos.
     const shellX = screenW - 24;
     this.hudShellX = shellX;
     const shellW = this.weapon().ammo > 4 ? 9 : 12;
+    {
+      const boxW = Math.max(this.weapon().ammo * (shellW + 8), 300) + 24;
+      const zone = { x: shellX + 12 - boxW, y: baseY - 50, w: boxW, h: 100 };
+      this.ammoZone = zone;
+      const empty = this.ammo === 0 && this.phase === 'wave';
+      const progress = Math.min(1, this.lookReloadMs / LOOK_RELOAD_MS);
+      ctx.save();
+      ctx.fillStyle = 'rgba(66, 32, 6, 0.55)';
+      ctx.strokeStyle = empty ? (Math.floor(now / 300) % 2 ? '#fca5a5' : '#f59e0b') : 'rgba(245, 158, 11, 0.45)';
+      ctx.lineWidth = empty ? 3 : 1.5;
+      ctx.beginPath();
+      ctx.roundRect(zone.x, zone.y, zone.w, zone.h, 10);
+      ctx.fill();
+      ctx.stroke();
+      if (progress > 0) {
+        ctx.fillStyle = 'rgba(74, 222, 128, 0.35)';
+        ctx.fillRect(zone.x + 2, zone.y + zone.h - 10, (zone.w - 4) * progress, 8);
+      }
+      ctx.restore();
+    }
     for (let i = 0; i < this.weapon().ammo; i++) {
       ctx.fillStyle = i < this.ammo ? '#f59e0b' : 'rgba(248, 250, 252, 0.2)';
       ctx.fillRect(shellX - (i + 1) * (shellW + 8), baseY - 14, shellW, 28);
@@ -857,7 +915,11 @@ export class DuckGame {
     ctx.fillStyle = '#f8fafc';
     ctx.fillText(this.weapon().name.toUpperCase(), shellX, baseY - 26);
     ctx.fillStyle = this.ammo === 0 && this.phase === 'wave' ? '#fca5a5' : '#94a3b8';
-    ctx.fillText(setup.weapons.length > 1 ? 'wink ← recarrega · wink → troca' : 'wink ← recarrega', shellX, baseY + 30);
+    ctx.fillText(
+      this.lookReloadMs > 0 ? 'recarregando...' : setup.weapons.length > 1 ? 'olhe aqui ou wink ← recarrega · wink → troca' : 'olhe aqui ou wink ← recarrega',
+      shellX,
+      baseY + 30,
+    );
     ctx.restore();
 
     // Super (acima da barra de foco): enche com a boca aberta; cheio pisca.

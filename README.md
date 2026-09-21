@@ -2,7 +2,7 @@
 
 Um jogo de caça aos patos controlado **só com o rosto**, direto no navegador. Não usa mouse nem teclado.
 
-Você mira com os olhos e a cabeça, atira fechando os olhos e recarrega piscando um olho só. A webcam lê o seu rosto com o [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker), e tudo roda no seu computador.
+Você mira com os olhos e a cabeça, atira fechando os olhos e recarrega olhando para a caixa de munição. A webcam lê o seu rosto com o [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker), e tudo roda no seu computador.
 
 > **Sua privacidade:** a imagem da câmera é processada localmente, no próprio navegador. Nada é gravado nem enviado para lugar nenhum. A internet só é usada para baixar o modelo de detecção de rosto.
 
@@ -108,7 +108,7 @@ npm install
 |---|---|
 | **Mirar** | Olhe para onde quer mirar. Virar a cabeça também move a mira. |
 | **Atirar** | Feche os **dois olhos** por um instante (mais longo que uma piscada normal). |
-| **Recarregar** | Feche só o **olho esquerdo** por um instante. |
+| **Recarregar** | Olhe para a **caixa de munição** (canto de baixo, à direita) por meio segundo. Ou feche só o **olho esquerdo** por um instante. |
 | **Trocar de arma** | Feche só o **olho direito** por um instante. |
 | **Super "Rajada"** | **Abra a boca** para carregar. Quando estiver cheio, feche os olhos para disparar. |
 | **Escolher nos menus** | Olhe para um botão: a mira trava nele (fica verde) e não escapa com o tremor. Feche os olhos por um instante para escolher. O mouse também funciona. |

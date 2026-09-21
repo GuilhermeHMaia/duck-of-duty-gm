@@ -25,7 +25,7 @@ export const BRIEFINGS: Record<string, readonly string[]> = {
   'lago-1': [
     'Treino básico. Olhe para um pato até o anel da mira ficar verde.',
     'Aí feche os dois olhos por um instante. Sem piscar à toa, hein?',
-    'Acabou a munição? Feche só o olho esquerdo. O direito troca de arma. Sim, é sério.',
+    'Acabou a munição? Olhe para a caixa de munição ali no canto. Ou feche só o olho esquerdo. O direito troca de arma. Sim, é sério.',
   ],
   'lago-2': [
     'Uma revoada inteira vindo. Mantenha a calma e a precisão.',
