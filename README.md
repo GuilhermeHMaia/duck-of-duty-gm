@@ -111,7 +111,7 @@ npm install
 | **Recarregar** | Feche só o **olho esquerdo** por um instante. |
 | **Trocar de arma** | Feche só o **olho direito** por um instante. |
 | **Super "Rajada"** | **Abra a boca** para carregar. Quando estiver cheio, feche os olhos para disparar. |
-| **Escolher nos menus** | Olhe para um botão (ele fica verde) e feche os olhos por um instante. O mouse também funciona. |
+| **Escolher nos menus** | Olhe para um botão: a mira trava nele (fica verde) e não escapa com o tremor. Feche os olhos por um instante para escolher. O mouse também funciona. |
 | **Recentralizar a mira** | Em **Mira livre**, olhe o alvo do centro e levante as sobrancelhas por 1 segundo (ou aperte `C`). |
 
 Teclas de apoio:

@@ -402,6 +402,9 @@ function render(now: number): void {
     const live = currentTargets().find((tg) => tg.id === aim!.snappedTargetId);
     if (live) aim = { ...aim, cursor: { x: live.x, y: live.y } };
   }
+  // Telas de menu: a mira travada num botão aparece presa no centro dele, verde.
+  const buttonLock = aim ? buttonScenes[activeScene]?.lockedCursor(screenW(), screenH()) : null;
+  if (aim && buttonLock) aim = { ...aim, cursor: buttonLock, snappedTargetId: 'button' };
   if (activeScene === 'game') game.render(ctx, now, screenW(), screenH(), aim);
   else if (activeScene === 'calibration') scene.render(ctx, now, screenW(), screenH(), aim);
   else buttonScenes[activeScene]?.render(ctx, now, screenW(), screenH());

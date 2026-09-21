@@ -64,17 +64,24 @@ export interface UiButton {
   onSelect: () => void;
 }
 
-/** Folga em volta do botão para contar como "olhando para ele" (a mira do olho não é precisa). */
-const HOVER_PADDING = 18;
+/** A mira trava num botão quando chega a esta distância (px) da borda dele. */
+export const BUTTON_LOCK_PADDING = 40;
+/** Travada, a mira só solta quando se afasta isto da borda do botão (histerese). */
+export const BUTTON_RELEASE_PADDING = 90;
+/** Para trocar de um botão travado para outro, a mira precisa estar DENTRO do outro e a esta distância do atual. */
+const BUTTON_SWITCH_MARGIN = 20;
 const HOVER_HISTORY_MS = 1500;
 
 /**
- * Tela feita de botões. Olhar para um botão o destaca; piscar devagar escolhe. O botão
- * escolhido é o que estava destacado preBlinkBufferMs antes de os olhos começarem a fechar
- * (fechar os olhos move a mira). O mouse também funciona.
+ * Tela feita de botões. A mira TRAVA no botão para onde você olha (como o ímã nos patos):
+ * o cursor pula para o centro dele, fica verde e só solta quando você olha claramente para
+ * longe, então o tremor não tira a mira do botão. Piscar devagar escolhe o botão travado
+ * preBlinkBufferMs antes de os olhos começarem a fechar (fechar os olhos move a mira).
+ * O mouse também funciona.
  *
- * Os botões não entram no snap magnético: vários botões perto um do outro fariam a mira
- * grudar no errado. O destaque usa a mira livre, com folga.
+ * A trava é própria dos botões (e não o snap dos patos) porque botões são retângulos grandes
+ * e vizinhos: a escolha é pelo botão mais próximo da borda, e trocar de botão exige entrar
+ * no outro, o que evita pular entre vizinhos.
  */
 export abstract class ButtonScene {
   private readonly blink = new DeliberateBlink();
@@ -90,6 +97,16 @@ export abstract class ButtonScene {
     this.hoveredId = null;
   }
 
+  /**
+   * Onde desenhar a mira presa no botão travado (null sem trava): no centro dos botões
+   * pequenos, e na ponta esquerda dos largos para não cobrir o texto.
+   */
+  lockedCursor(w: number, h: number): { x: number; y: number } | null {
+    const b = this.layout(w, h).find((it) => it.id === this.hoveredId && it.enabled !== false);
+    if (!b) return null;
+    return { x: b.w > 140 ? b.x + 30 : b.x + b.w / 2, y: b.y + b.h / 2 };
+  }
+
   protected abstract layout(w: number, h: number): UiButton[];
   protected abstract drawContent(ctx: CanvasRenderingContext2D, now: number, w: number, h: number): void;
 
@@ -99,8 +116,7 @@ export abstract class ButtonScene {
 
   onFrame(frame: FaceFrame, aim: AimState | null, w: number, h: number): void {
     const buttons = this.layout(w, h);
-    const hovered = aim ? hitTest(buttons, aim.unsnapped.x, aim.unsnapped.y, HOVER_PADDING) : null;
-    this.hoveredId = hovered?.id ?? null;
+    this.hoveredId = aim ? lockButton(buttons, this.hoveredId, aim.unsnapped.x, aim.unsnapped.y) : null;
     this.hoverHistory.push({ t: frame.timestamp, id: this.hoveredId });
     while (this.hoverHistory.length > 0 && this.hoverHistory[0].t < frame.timestamp - HOVER_HISTORY_MS) this.hoverHistory.shift();
 
@@ -128,6 +144,40 @@ export abstract class ButtonScene {
   protected footerHint(): string | null {
     return 'Olhe um botão e feche os olhos por um instante para escolher · ou clique';
   }
+}
+
+/** Distância (px) do ponto até o retângulo do botão; 0 dentro dele. */
+function distanceToButton(b: UiButton, x: number, y: number): number {
+  const dx = Math.max(b.x - x, 0, x - (b.x + b.w));
+  const dy = Math.max(b.y - y, 0, y - (b.y + b.h));
+  return Math.hypot(dx, dy);
+}
+
+/**
+ * Qual botão fica travado com a mira em (x, y), sabendo qual estava travado antes.
+ * Sem trava: trava no botão habilitado mais próximo, se estiver a até BUTTON_LOCK_PADDING.
+ * Com trava: continua nele até a mira sair de BUTTON_RELEASE_PADDING, ou até entrar em
+ * outro botão estando a mais de BUTTON_SWITCH_MARGIN do atual.
+ */
+export function lockButton(buttons: UiButton[], currentId: string | null, x: number, y: number): string | null {
+  const enabled = buttons.filter((b) => b.enabled !== false);
+  let nearest: UiButton | null = null;
+  let nearestDist = Infinity;
+  for (const b of enabled) {
+    const d = distanceToButton(b, x, y);
+    if (d < nearestDist) {
+      nearest = b;
+      nearestDist = d;
+    }
+  }
+  const current = enabled.find((b) => b.id === currentId);
+  if (current) {
+    const dCurrent = distanceToButton(current, x, y);
+    const inside = enabled.find((b) => b !== current && distanceToButton(b, x, y) === 0);
+    if (inside && dCurrent > BUTTON_SWITCH_MARGIN) return inside.id;
+    if (dCurrent <= BUTTON_RELEASE_PADDING) return current.id;
+  }
+  return nearest && nearestDist <= BUTTON_LOCK_PADDING ? nearest.id : null;
 }
 
 function hitTest(buttons: UiButton[], x: number, y: number, pad: number): UiButton | null {
