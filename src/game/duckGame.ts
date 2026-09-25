@@ -3,7 +3,8 @@ import type { DebugConfig, FaceFrame } from '../types';
 import type { AimState, AimTarget } from './aiming';
 import { Boss, BOSS_ID } from './boss';
 import { Duck } from './duck';
-import { drawDarkness, drawEnvironmentBack, drawEnvironmentFront, isDark, isLit, type EnvironmentId } from './environments';
+import { Dog } from './dog';
+import { drawDarkness, drawEnvironmentBack, drawEnvironmentFront, drawVignette, isDark, isLit, type EnvironmentId } from './environments';
 import { FocusMeter } from './focusMeter';
 import { DUCKS_PER_ROUND, Score } from './score';
 import { sfx } from './sound';
@@ -188,6 +189,8 @@ export class DuckGame {
   private shySlots = new Set<number>();
   private ghostSlots = new Set<number>();
   private boss: Boss | null = null;
+  /** Mascote: sobe da grama no fim da rodada, rindo ou segurando os patos. */
+  private readonly dog = new Dog();
   private bossStart = 0;
   private minionGapStart: number | null = null;
   private endMessage = '';
@@ -303,13 +306,17 @@ export class DuckGame {
     const shake = Math.max(0, 1 - (now - this.shakeAt) / SHAKE_MS);
     if (shake > 0) ctx.translate((Math.random() - 0.5) * 16 * shake, (Math.random() - 0.5) * 16 * shake);
 
-    drawEnvironmentBack(ctx, env, screenW, screenH, groundY);
+    drawEnvironmentBack(ctx, env, screenW, screenH, groundY, now);
+    for (const d of this.ducks) drawDuckShadow(ctx, d, groundY);
     for (const d of this.ducks) drawDuck(ctx, d);
-    drawEnvironmentFront(ctx, env, screenW, screenH, groundY);
+    drawEnvironmentFront(ctx, env, screenW, screenH, groundY, now);
     drawDarkness(ctx, env, screenW, screenH, isDark(env) ? (aim?.unsnapped ?? this.light) : null);
     this.boss?.draw(ctx);
+    // O cachorro sobe da vegetação da frente, não da linha do horizonte.
+    this.dog.draw(ctx, now, screenW, groundY + (screenH - groundY) * 0.3);
     this.drawFeathers(ctx);
     this.drawFlashes(ctx, now);
+    drawVignette(ctx, screenW, screenH);
     ctx.restore();
 
     if (now - this.superFlashAt < 400) {
@@ -380,6 +387,7 @@ export class DuckGame {
     this.endMessage = '';
     this.focus.reset();
     this.lookReloadMs = 0;
+    this.dog.hide();
     this.ammoByWeapon = new Map(this.setup!.weapons.map((w) => [w.id, w.ammo]));
     // Sorteia quais patos da rodada são especiais (nunca o primeiro, para dar tempo de aprender).
     const slots = Array.from({ length: Math.max(0, round.ducks - 1) }, (_, i) => i + 1).sort(() => Math.random() - 0.5);
@@ -426,6 +434,7 @@ export class DuckGame {
             this.lastBonus = this.setup!.mode === 'arcade' ? this.score.endRound() : 0;
             this.phase = 'roundEnd';
             this.phaseStart = now;
+            this.dog.show(now, this.score.roundResults.filter((r) => r === 'hit').length);
           }
         }
         break;
@@ -452,12 +461,14 @@ export class DuckGame {
       this.endMessage = 'General Grasnado derrotado!';
       this.phase = 'roundEnd';
       this.phaseStart = now;
+      this.dog.show(now, 2);
       return;
     }
     if (boss.state === 'fighting' && now - this.bossStart >= timeLimitMs) {
       this.endMessage = 'Tempo esgotado — o General escapou';
       this.phase = 'roundEnd';
       this.phaseStart = now;
+      this.dog.show(now, 0);
       return;
     }
     // Patos de apoio: uma nova dupla MINION_GAP_MS depois que a anterior some.
@@ -993,6 +1004,20 @@ function drawLens(ctx: CanvasRenderingContext2D, x: number, y: number): void {
   ctx.restore();
 }
 
+/** Sombra elíptica no chão embaixo do pato: quanto mais alto, menor e mais fraca. */
+function drawDuckShadow(ctx: CanvasRenderingContext2D, d: Duck, groundY: number): void {
+  if (d.state === 'gone' || d.opacity <= 0) return;
+  const height = Math.max(0, groundY - d.y);
+  const k = Math.max(0.15, 1 - height / (groundY || 1));
+  ctx.save();
+  ctx.globalAlpha = 0.28 * k * d.opacity;
+  ctx.fillStyle = '#000000';
+  ctx.beginPath();
+  ctx.ellipse(d.x, groundY + 8, Duck.RADIUS * (0.6 + k * 0.6), Duck.RADIUS * 0.22, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawDuck(ctx: CanvasRenderingContext2D, d: Duck): void {
   if (d.state === 'gone') return;
   const opacity = d.opacity;
@@ -1003,23 +1028,63 @@ function drawDuck(ctx: CanvasRenderingContext2D, d: Duck): void {
   ctx.translate(d.x, d.y);
   if (d.tumbling) ctx.rotate(Math.PI);
   ctx.scale(d.facing, 1);
+  // Inclina o corpo conforme sobe ou desce, como um pato de verdade.
+  const flap = Math.sin(d.wingPhase) * 0.9;
+  ctx.rotate(d.state === 'falling' ? 0 : flap * 0.08);
+
+  // asa de trás (mais escura, bate em contratempo): dá volume
+  ctx.fillStyle = d.shy ? '#1f3a50' : d.ghost ? '#94a3b8' : '#332616';
+  ctx.beginPath();
+  ctx.ellipse(-r * 0.25, -r * 0.12, r * 0.5, r * 0.24, flap * 0.6, 0, Math.PI * 2);
+  ctx.fill();
 
   // corpo (blindado: metal cinza; tímido: azulado; fantasma: pálido)
   ctx.fillStyle = d.armored ? '#64748b' : d.shy ? '#3b6b8f' : d.ghost ? '#cbd5e1' : d.state === 'falling' ? '#8b5a2b' : '#6b4f2a';
+  ctx.strokeStyle = 'rgba(12, 10, 6, 0.55)';
+  ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.ellipse(0, 0, r, r * 0.62, 0, 0, Math.PI * 2);
   ctx.fill();
-  // asa batendo
-  const flap = Math.sin(d.wingPhase) * 0.9;
-  ctx.fillStyle = d.shy ? '#2a4d68' : d.ghost ? '#94a3b8' : '#4a3720';
+  ctx.stroke();
+  // barriga mais clara
+  ctx.fillStyle = d.armored ? '#94a3b8' : d.shy ? '#5b8fb3' : d.ghost ? '#e2e8f0' : '#8f6d3d';
+  ctx.beginPath();
+  ctx.ellipse(-r * 0.1, r * 0.18, r * 0.72, r * 0.34, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // cauda
+  ctx.fillStyle = d.shy ? '#2a4d68' : d.ghost ? '#cbd5e1' : '#4a3720';
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.92, -r * 0.08);
+  ctx.lineTo(-r * 1.38, -r * 0.34);
+  ctx.lineTo(-r * 0.86, r * 0.2);
+  ctx.fill();
+  // asa da frente batendo
+  ctx.fillStyle = d.shy ? '#2a4d68' : d.ghost ? '#f8fafc' : '#5c451f';
   ctx.beginPath();
   ctx.ellipse(-r * 0.15, -r * 0.1, r * 0.55, r * 0.28, -flap, 0, Math.PI * 2);
   ctx.fill();
-  // cabeça, olho e bico
-  ctx.fillStyle = d.ghost ? '#e2e8f0' : '#166534';
+  ctx.strokeStyle = 'rgba(12, 10, 6, 0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // pescoço, cabeça, olho e bico
+  ctx.fillStyle = d.ghost ? '#e2e8f0' : d.shy ? '#2f5f80' : '#166534';
+  ctx.beginPath();
+  ctx.ellipse(r * 0.62, -r * 0.24, r * 0.3, r * 0.34, -0.5, 0, Math.PI * 2);
+  ctx.fill();
   ctx.beginPath();
   ctx.arc(r * 0.85, -r * 0.45, r * 0.38, 0, Math.PI * 2);
   ctx.fill();
+  ctx.strokeStyle = 'rgba(12, 10, 6, 0.5)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // colar branco
+  if (!d.ghost && !d.armored) {
+    ctx.strokeStyle = '#f1f5f9';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(r * 0.7, -r * 0.2, r * 0.26, -0.9, 1.3);
+    ctx.stroke();
+  }
   if (d.armored) {
     ctx.fillStyle = '#cbd5e1';
     ctx.beginPath();
