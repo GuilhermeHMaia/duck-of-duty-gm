@@ -10,6 +10,7 @@ import { COMPLETION_HOOKS } from './career/story';
 import { ARCADE_ROUNDS, DuckGame, type GameSetup, type GameStats } from './game/duckGame';
 import { sfx } from './game/sound';
 import { AchievementsScene } from './scenes/achievementsScene';
+import { CalibrationResultScene } from './scenes/calibrationResultScene';
 import { ArsenalScene } from './scenes/arsenalScene';
 import { BriefingScene } from './scenes/briefingScene';
 import { MapScene } from './scenes/mapScene';
@@ -72,6 +73,7 @@ type SceneId =
   | 'welcome'
   | 'setup'
   | 'calibration'
+  | 'calibResult'
   | 'menu'
   | 'map'
   | 'briefing'
@@ -147,12 +149,31 @@ const scene = new CalibrationScene(store, buffer, {
   },
   startGame: () => nav.menu(),
   recenter: (x, y) => aiming.recenter(x, y),
-  afterResults: () => {
-    if (isOnboardingDone() || !store.model) return false;
-    // Primeira vez guiada: do Estande direto para a missão tutorial do Lago.
+  onResults: (outcome) => {
+    calibrationResultScene.show(outcome);
+    goto('calibResult');
+  },
+});
+const calibrationResultScene = new CalibrationResultScene(config, {
+  continue: () => {
+    if (!isOnboardingDone()) {
+      // Primeira vez guiada: do Estande direto para a missão tutorial do Lago.
+      markOnboardingDone();
+      nav.briefing('lago-1');
+      return;
+    }
+    nav.menu();
+  },
+  testAim: () => nav.freeAim(),
+  repeatWorst: () => {
+    goto('calibration');
+    scene.repeatWorstPoint();
+  },
+  retryAll: () => nav.recalibrate(),
+  // Sem calibração a mira usa só a cabeça; o menu avisa e dá para calibrar depois.
+  headOnly: () => {
     markOnboardingDone();
-    nav.briefing('lago-1');
-    return true;
+    nav.menu();
   },
 });
 const welcomeScene = new WelcomeScene(config, () => void boot());
@@ -172,7 +193,11 @@ const settingsScene = new SettingsScene(config, nav, {
   },
 });
 const menuScene = new MenuScene(config, career, nav, () =>
-  store.invalidatedReason ? 'A janela mudou de tamanho e a calibração foi apagada: use Recalibrar' : null,
+  store.invalidatedReason
+    ? 'A janela mudou de tamanho e a calibração foi apagada: use Recalibrar'
+    : store.model
+      ? null
+      : 'Sem calibração: a mira usa só a cabeça. Use Recalibrar quando quiser mirar com os olhos.',
 );
 const mapScene = new MapScene(config, career, nav);
 const briefingScene = new BriefingScene(config, career, nav);
@@ -182,6 +207,7 @@ const achievementsScene = new AchievementsScene(config, career, nav);
 const buttonScenes: Partial<Record<SceneId, ButtonScene>> = {
   welcome: welcomeScene,
   setup: setupScene,
+  calibResult: calibrationResultScene,
   settings: settingsScene,
   menu: menuScene,
   map: mapScene,

@@ -8,8 +8,6 @@ import { median, type CalibrationSample, type CalibrationStore } from './calibra
 const SETTLE_MS = 400;            // atraso entre o alvo aparecer e a captura ser habilitada
 /** Gatilho: os dois olhos fechados (bothClosed) por pelo menos isso. Piscada natural fica em ~100–150 ms. */
 export const BLINK_TRIGGER_MS = 200;
-/** Na tela de resultado, olhos fechados por isso = repetir o pior alvo. */
-const BLINK_LONG_MS = 1000;
 /** Mira livre: sobrancelhas levantadas (browInnerUp) por RECENTER_HOLD_MS = recentralizar. */
 const BROW_UP_THRESHOLD = 0.5;
 const RECENTER_HOLD_MS = 1000;
@@ -27,6 +25,23 @@ const MAX_HEAD_FROM_OTHERS_DEG = 5; // distância máxima da pose até a mediana
  */
 const FEATURE_STD_LIMITS = [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.06, 0.06];
 
+/**
+ * Tolerância: quando o MESMO alvo é descartado DISCARDS_TO_RELAX vezes, o Estande passa para o
+ * próximo nível de folga (e avisa na tela). Sem isso, quem tem câmera fraca ou não consegue ficar
+ * parado fica preso no mesmo alvo para sempre. Nível 0 = limites originais.
+ */
+export const DISCARDS_TO_RELAX = 3;
+export const TOLERANCE_LEVELS = [
+  { head: 1, featureStd: 1, windowStartMs: WINDOW_START_MS, minFrames: MIN_WINDOW_FRAMES, settleMs: SETTLE_MS },
+  { head: 1.8, featureStd: 2, windowStartMs: 400, minFrames: 3, settleMs: 300 },
+  { head: 2.6, featureStd: 3, windowStartMs: 320, minFrames: 2, settleMs: 250 },
+] as const;
+const TOLERANCE_MESSAGES = [
+  '',
+  'Vamos com mais folga: olhe o centro do alvo e feche os olhos quando estiver pronto',
+  'Folga máxima: se ainda não cair, dá para jogar só com a cabeça no fim do Estande',
+];
+
 // ---------- Apresentação ----------
 const PASSES = 2;
 const TARGET_RADIUS = 40;
@@ -37,8 +52,22 @@ const BAD_POINT_PX = 150;
 const GRID_MARGIN = 0.1;
 /** Por quanto tempo a dica de uma amostra descartada fica na tela. */
 const DISCARD_HINT_MS = 2500;
+/** Quanto tempo o aviso de folga aumentada fica na tela. */
+const TOLERANCE_MESSAGE_MS = 4000;
 
-type Phase = 'intro' | 'target' | 'falling' | 'results' | 'free';
+type Phase = 'intro' | 'target' | 'falling' | 'free';
+
+/** Resultado do Estande, mostrado pela tela de resultado (scenes/calibrationResultScene). */
+export interface CalibrationOutcome {
+  meanResidual: number | null;
+  /** Alvo com o pior resíduo (acima de BAD_POINT_PX), para oferecer repetir só ele. */
+  worstPoint: number | null;
+  worstResidual: number | null;
+  /** Mensagem de erro quando nem deu para treinar o modelo. */
+  error: string | null;
+  /** Nível de folga usado na coleta (0 = limites originais). */
+  toleranceLevel: number;
+}
 
 export interface DiscardInfo {
   reason: string;
@@ -52,11 +81,8 @@ export interface CalibrationSceneHooks {
   startGame(): void;
   /** Recentralizar a mira no ponto (x, y) que o jogador está olhando. Devolve se deu certo. */
   recenter(x: number, y: number): boolean;
-  /**
-   * Piscada rápida na tela de resultado. Devolve true se quem chamou assumiu a navegação
-   * (primeira vez guiada segue para o tutorial); false mantém o padrão, a mira livre.
-   */
-  afterResults(): boolean;
+  /** O Estande terminou (com sucesso ou não): quem chama mostra a tela de resultado. */
+  onResults(outcome: CalibrationOutcome): void;
 }
 
 /**
@@ -77,7 +103,10 @@ export class CalibrationScene {
   private totalInRun = 0;
   private repeating: number | null = null;
   private worstPoint: number | null = null;
-  private resultError: string | null = null;
+  /** Quantas amostras foram descartadas em cada alvo nesta tentativa (para afrouxar os limites). */
+  private discardsByPoint = new Map<number, number>();
+  private toleranceLevel = 0;
+  private toleranceMessageAt = -Infinity;
 
   private browUpSince: number | null = null;
   private browHandled = false;
@@ -99,7 +128,8 @@ export class CalibrationScene {
     this.queue = [];
     this.repeating = null;
     this.worstPoint = null;
-    this.resultError = null;
+    this.discardsByPoint.clear();
+    this.toleranceLevel = 0;
     this.lastDiscard = null;
     this.closedSince = null;
     this.closureHandled = true; // uma piscada já em curso ao abrir o Estande não conta
@@ -108,6 +138,17 @@ export class CalibrationScene {
 
   showFreeAim(): void {
     this.phase = 'free';
+  }
+
+  /** Repete só o pior alvo do resultado (botão da tela de resultado). */
+  repeatWorstPoint(): void {
+    if (this.worstPoint === null) return;
+    this.repeatPoint(this.worstPoint, performance.now());
+  }
+
+  /** Limites de aceitação da amostra no nível de folga atual. */
+  private get tolerance(): (typeof TOLERANCE_LEVELS)[number] {
+    return TOLERANCE_LEVELS[Math.min(this.toleranceLevel, TOLERANCE_LEVELS.length - 1)];
   }
 
   /** Durante a coleta o cursor fica escondido para não puxar o olhar. */
@@ -138,13 +179,7 @@ export class CalibrationScene {
       const held = t - this.closedSince;
       if (this.closureHandled) return;
 
-      if (this.phase === 'results') {
-        // Resultado: segurar 1 s repete o pior alvo (a decisão "continuar" fica para a reabertura).
-        if (this.worstPoint !== null && held >= BLINK_LONG_MS) {
-          this.closureHandled = true;
-          this.repeatPoint(this.worstPoint, now);
-        }
-      } else if (held >= BLINK_TRIGGER_MS) {
+      if (held >= BLINK_TRIGGER_MS) {
         this.closureHandled = true;
         this.onDeliberateBlink(this.closedSince, screenW, screenH, now);
       }
@@ -153,8 +188,6 @@ export class CalibrationScene {
 
     // Olhos reabriram.
     if (this.closedSince !== null) {
-      const held = t - this.closedSince;
-      if (!this.closureHandled && this.phase === 'results' && held >= BLINK_TRIGGER_MS && !this.hooks.afterResults()) this.phase = 'free';
       this.closedSince = null;
       this.closureHandled = false;
     }
@@ -193,7 +226,7 @@ export class CalibrationScene {
         this.hooks.startGame();
         break;
       case 'target':
-        if (now < this.appearedAt + SETTLE_MS) return; // captura ainda não habilitada
+        if (now < this.appearedAt + this.tolerance.settleMs) return; // captura ainda não habilitada
         this.capture(closureStart, screenW, screenH, now);
         break;
       default:
@@ -223,6 +256,12 @@ export class CalibrationScene {
         if (this.lastDiscard && now - this.lastDiscard.at < DISCARD_HINT_MS) {
           drawText(ctx, screenW / 2, 72, friendlyDiscardHint(this.lastDiscard.reason), 20, '#fde68a');
         }
+        if (this.toleranceLevel > 0) {
+          drawText(ctx, screenW / 2, screenH - 30, `folga aumentada (nivel ${this.toleranceLevel})`, 14, '#64748b');
+          if (now - this.toleranceMessageAt < TOLERANCE_MESSAGE_MS) {
+            drawText(ctx, screenW / 2, 104, TOLERANCE_MESSAGES[this.toleranceLevel] ?? '', 18, '#7dd3fc');
+          }
+        }
         break;
       }
 
@@ -237,10 +276,6 @@ export class CalibrationScene {
         this.drawHud(ctx, screenW);
         break;
       }
-
-      case 'results':
-        this.drawResults(ctx, screenW, screenH);
-        break;
 
       case 'free': {
         for (let i = 0; i < 9; i++) {
@@ -288,8 +323,14 @@ export class CalibrationScene {
 
   private finish(screenW: number, screenH: number): void {
     this.repeating = null;
-    this.resultError = null;
     this.worstPoint = null;
+    const outcome: CalibrationOutcome = {
+      meanResidual: null,
+      worstPoint: null,
+      worstResidual: null,
+      error: null,
+      toleranceLevel: this.toleranceLevel,
+    };
     try {
       const model = this.store.fit(this.samples, screenW, screenH);
       let worst = -1;
@@ -297,12 +338,17 @@ export class CalibrationScene {
         if (r > BAD_POINT_PX && (worst < 0 || r > model.residuals[worst])) worst = i;
       });
       this.worstPoint = worst >= 0 ? worst : null;
+      outcome.meanResidual = model.meanResidual;
+      outcome.worstPoint = this.worstPoint;
+      outcome.worstResidual = this.worstPoint === null ? null : model.residuals[this.worstPoint];
     } catch (err) {
       console.error('[calibração] falha no treino', err);
-      this.resultError = err instanceof Error ? err.message : String(err);
+      outcome.error = err instanceof Error ? err.message : String(err);
     }
-    this.phase = 'results';
+    // A cena volta para a mira livre por baixo; a tela de resultado fica por cima, com os botões.
+    this.phase = 'free';
     this.hooks.setPanelCollapsed(false);
+    this.hooks.onResults(outcome);
   }
 
   // ---------- Coleta ----------
@@ -310,9 +356,17 @@ export class CalibrationScene {
   private capture(closureStart: number, screenW: number, screenH: number, now: number): void {
     const result = this.buildSample(closureStart, screenW, screenH);
     if (typeof result === 'string') {
-      // Descartado: registra o motivo no painel e o mesmo alvo "reaparece", sem aviso na cena.
+      // Descartado: registra o motivo (vira dica na tela) e o mesmo alvo "reaparece".
       this.lastDiscard = { reason: result, at: now, pointIndex: this.currentPoint };
       this.appearedAt = now;
+      // Insistiu no mesmo alvo: afrouxa os limites para ninguém ficar preso nele.
+      const discards = (this.discardsByPoint.get(this.currentPoint) ?? 0) + 1;
+      this.discardsByPoint.set(this.currentPoint, discards);
+      const level = Math.min(Math.floor(discards / DISCARDS_TO_RELAX), TOLERANCE_LEVELS.length - 1);
+      if (level > this.toleranceLevel) {
+        this.toleranceLevel = level;
+        this.toleranceMessageAt = now;
+      }
       return;
     }
     this.samples.push(result);
@@ -328,17 +382,18 @@ export class CalibrationScene {
     const frames = this.buffer.getFrames();
     if (frames.length === 0) return 'Buffer vazio';
 
-    const from = closureStart - WINDOW_START_MS;
+    const tol = this.tolerance;
+    const from = closureStart - tol.windowStartMs;
     const to = closureStart - WINDOW_END_MS;
 
-    if (from < this.appearedAt + SETTLE_MS) {
-      return 'Piscada cedo demais: a janela de 500 ms começa antes do olhar se acomodar no alvo';
+    if (from < this.appearedAt + tol.settleMs) {
+      return `Piscada cedo demais: a janela de ${tol.windowStartMs} ms começa antes do olhar se acomodar no alvo`;
     }
-    if (frames[0].timestamp > from) return 'O buffer não cobre a janela de 500 ms';
+    if (frames[0].timestamp > from) return `O buffer não cobre a janela de ${tol.windowStartMs} ms`;
 
     const win = frames.filter((f) => f.timestamp >= from && f.timestamp <= to);
-    if (win.length < MIN_WINDOW_FRAMES) {
-      return `Poucos frames na janela (${win.length} < ${MIN_WINDOW_FRAMES}) — FPS da câmera baixo`;
+    if (win.length < tol.minFrames) {
+      return `Poucos frames na janela (${win.length} < ${tol.minFrames}) — FPS da câmera baixo`;
     }
     if (win.some((f) => !f.faceDetected)) return 'Rosto perdido em algum frame da janela';
     if (win.some((f) => !f.gazeFeatures)) return 'Olho fechado ou perdido em algum frame da janela';
@@ -347,16 +402,18 @@ export class CalibrationScene {
     for (const axis of axes) {
       const values = win.map((f) => f.headPose[axis]);
       const range = Math.max(...values) - Math.min(...values);
-      if (range > MAX_HEAD_RANGE_DEG) {
-        return `Cabeça variou ${range.toFixed(1)}° em ${axis} na janela (máx. ${MAX_HEAD_RANGE_DEG}°)`;
+      const maxRange = MAX_HEAD_RANGE_DEG * tol.head;
+      if (range > maxRange) {
+        return `Cabeça variou ${range.toFixed(1)}° em ${axis} na janela (máx. ${maxRange.toFixed(1)}°)`;
       }
     }
 
     const features = GAZE_FEATURE_NAMES.map((_, k) => win.map((f) => f.gazeFeatures![k]));
     for (let k = 0; k < features.length; k++) {
       const sd = stdDev(features[k]);
-      if (sd > FEATURE_STD_LIMITS[k]) {
-        return `Olhar instável: σ(${GAZE_FEATURE_NAMES[k]}) = ${sd.toFixed(3)} > ${FEATURE_STD_LIMITS[k]}`;
+      const limit = FEATURE_STD_LIMITS[k] * tol.featureStd;
+      if (sd > limit) {
+        return `Olhar instável: σ(${GAZE_FEATURE_NAMES[k]}) = ${sd.toFixed(3)} > ${limit.toFixed(3)}`;
       }
     }
 
@@ -372,8 +429,9 @@ export class CalibrationScene {
       for (const axis of axes) {
         const ref = median(this.samples.map((s) => s.headPose[axis]));
         const d = Math.abs(headPose[axis] - ref);
-        if (d > MAX_HEAD_FROM_OTHERS_DEG) {
-          return `Cabeça a ${d.toFixed(1)}° (${axis}) da posição das outras amostras (máx. ${MAX_HEAD_FROM_OTHERS_DEG}°)`;
+        const maxFromOthers = MAX_HEAD_FROM_OTHERS_DEG * tol.head;
+        if (d > maxFromOthers) {
+          return `Cabeça a ${d.toFixed(1)}° (${axis}) da posição das outras amostras (máx. ${maxFromOthers.toFixed(1)}°)`;
         }
       }
     }
@@ -399,27 +457,6 @@ export class CalibrationScene {
     drawText(ctx, screenW / 2, 40, label, 18, '#94a3b8');
   }
 
-  private drawResults(ctx: CanvasRenderingContext2D, screenW: number, screenH: number): void {
-    const cx = screenW / 2;
-    const cy = screenH / 2;
-    const model = this.store.model;
-    if (this.resultError || !model) {
-      drawText(ctx, cx, cy - 20, 'Não foi possível calibrar', 36, '#fca5a5');
-      drawText(ctx, cx, cy + 25, this.resultError ?? '', 16, '#cbd5e1');
-      drawText(ctx, cx, cy + 65, 'Feche os dois olhos por um instante para continuar', 18, '#94a3b8');
-      return;
-    }
-    drawText(ctx, cx, cy - 80, 'Estande concluído', 40, '#f8fafc');
-    drawText(ctx, cx, cy - 20, `Precisão: ${stars(model.meanResidual)}`, 36, '#facc15');
-    drawText(ctx, cx, cy + 25, `Erro médio: ${Math.round(model.meanResidual)} px`, 20, '#cbd5e1');
-    if (this.worstPoint !== null) {
-      const r = Math.round(model.residuals[this.worstPoint]);
-      drawText(ctx, cx, cy + 75, `O alvo ${this.worstPoint + 1} ficou impreciso (${r} px)`, 20, '#fca5a5');
-      drawText(ctx, cx, cy + 110, 'Piscada rápida: continuar  ·  Olhos fechados por 1 s: repetir esse alvo', 18, '#94a3b8');
-    } else {
-      drawText(ctx, cx, cy + 75, 'Feche os dois olhos por um instante para continuar', 18, '#94a3b8');
-    }
-  }
 }
 
 // ---------- Utilitários ----------
@@ -471,7 +508,7 @@ function stdDev(values: number[]): number {
   return Math.sqrt(values.reduce((a, v) => a + (v - mean) ** 2, 0) / values.length);
 }
 
-function stars(meanErrorPx: number): string {
+export function stars(meanErrorPx: number): string {
   const n = meanErrorPx <= 40 ? 5 : meanErrorPx <= 70 ? 4 : meanErrorPx <= 100 ? 3 : meanErrorPx <= 150 ? 2 : 1;
   return '★'.repeat(n) + '☆'.repeat(5 - n);
 }
